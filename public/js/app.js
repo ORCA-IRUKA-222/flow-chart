@@ -25,7 +25,7 @@ import { debounce, el, hideToast, toast, uid } from './util.js';
 const $ = (id) => document.getElementById(id);
 
 // アプリを更新したら、sw.js の CACHE と一緒に変える
-export const APP_VERSION = '2026.11.26-4';
+export const APP_VERSION = '2026.11.26-5';
 
 const clientId = (() => {
   let id = localStorage.getItem('fc:client');
@@ -727,7 +727,7 @@ const TOOL_INFO = {
   select: { name: '選択', hint: 'ノードを動かす・つなぐ・編集する。ペンでなぞると範囲選択、指でドラッグすると画面の移動' },
   text: { name: '文字ペン', hint: '文字を書く（黒）。ノードの中に書くとそのノードの文字、線の近くに書くと線のラベルになります' },
   shape: { name: '図形ペン', hint: '四角・角丸・ひし形・丸・平行四辺形の枠と、つなぐ線を書く（青）' },
-  eraser: { name: '消しゴム', hint: 'なぞった手書きの線を消します' },
+  eraser: { name: '消しゴム', hint: 'なぞった手書き・ノード・線を消します（最初に触れたものの種類だけ消えます）' },
 };
 
 let toolHintUntil = 0;
@@ -852,6 +852,12 @@ function bindUI() {
     if (t instanceof HTMLInputElement || t?.isContentEditable || document.querySelector('dialog[open]')) return;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
+    // サイドボタンを PageDown / PageUp キーとして送るペン（Redmi / Xiaomi のスマートペンなど）
+    if ((e.key === 'PageDown' || e.key === 'PageUp') && !mod && (canvas.penSeen || window.matchMedia('(pointer: coarse)').matches)) {
+      e.preventDefault();
+      if (!e.repeat) canvas.onPenButton(e.key === 'PageDown' ? 'barrel' : 'aux');
+      return;
+    }
     if (mod && key === 'z') {
       e.preventDefault();
       if (e.shiftKey) redo();
@@ -893,6 +899,16 @@ function bindUI() {
   });
   canvas.addEventListener('tool', onToolChanged);
   canvas.addEventListener('ink-history', (e) => pushHistory({ ink: e.detail }));
+  // 消しゴムで消した手書きとノード・線は、1回の操作として元に戻す
+  canvas.addEventListener('erase-history', (e) => {
+    const { items, docChanges } = e.detail;
+    if (docChanges.length) {
+      suppressDocHistory = true;
+      doc.pushHistory(docChanges);
+      suppressDocHistory = false;
+    }
+    pushHistory({ doc: docChanges.length > 0, ink: items.length ? { type: 'erase', items } : null });
+  });
   canvas.addEventListener('pen-button', (e) => {
     const d = e.detail;
     if (d.unknown !== undefined) toast(`ペンのボタン（${d.unknown}）には何も割り当てていません`);

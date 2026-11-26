@@ -5,6 +5,7 @@ import {
   center,
   containsPoint,
   dist,
+  distToPolyline,
   parallelogramSkew,
   pointAlong,
   rectsIntersect,
@@ -708,8 +709,7 @@ export class Canvas extends EventTarget {
         this.emit('ink-history', { type: 'add', stroke: a.stroke });
         break;
       case 'erase':
-        this.hideEraser();
-        if (a.removed.length) this.emit('ink-history', { type: 'erase', items: a.removed });
+        this.finishErase(a);
         break;
       case 'move':
         if (a.moved) {
@@ -800,10 +800,7 @@ export class Canvas extends EventTarget {
       this.liveStroke?.remove();
       this.liveStroke = null;
     }
-    if (a.type === 'erase') {
-      this.hideEraser();
-      if (a.removed.length) this.emit('ink-history', { type: 'erase', items: a.removed });
-    }
+    if (a.type === 'erase') this.finishErase(a);
     if (a.type === 'move' && a.moved) {
       const tx = this.doc.tx();
       for (const [id, o] of a.origins) tx.put('node', { id, x: o.x, y: o.y });
@@ -892,7 +889,8 @@ export class Canvas extends EventTarget {
   }
 
   startErase(e, w) {
-    this.action = { type: 'erase', pid: e.pointerId, ptype: e.pointerType, sx: 0, sy: 0, moved: true, removed: [] };
+    // mode: 最初に触れたものの種類（'ink' = 手書きだけ、'items' = ノードと線だけ）を、このなぞりの間は消す
+    this.action = { type: 'erase', pid: e.pointerId, ptype: e.pointerType, sx: 0, sy: 0, moved: true, removed: [], docChanges: [], mode: null };
     this.eraseAt(w, this.action);
     this.showEraserAt(this.screenPoint(e));
   }
@@ -909,6 +907,47 @@ export class Canvas extends EventTarget {
   }
 
   eraseNear(w, r, a) {
+    if (a.mode !== 'items' && this.eraseInkNear(w, r, a)) a.mode = 'ink';
+    if (a.mode === 'ink') return;
+    // なぞり始めに近くに手書きがあれば、手書きを消したいのだと考えてノードや線は消さない
+    if (a.mode === null && this.inkNear(w, r * 3)) return;
+    if (this.eraseItemsNear(w, r, a)) a.mode = 'items';
+  }
+
+  inkNear(w, r) {
+    for (const s of this.ink) {
+      const b = s.box || (s.box = boxOfPoints(s.points));
+      if (w.x < b.x - r || w.x > b.x + b.w + r || w.y < b.y - r || w.y > b.y + b.h + r) continue;
+      if (s.points.some((q, j) => distToSeg(w, s.points[j - 1] || q, q) <= r)) return true;
+    }
+    return false;
+  }
+
+  /** 消しゴムが触れた線（橋）を消す。線に触れていなければ、その下のノードを、つながる線ごと消す */
+  eraseItemsNear(w, r, a) {
+    const changes = [];
+    for (const e of this.doc.edges()) {
+      const from = this.doc.node(e.from);
+      const to = this.doc.node(e.to);
+      if (!from || !to) continue;
+      if (distToPolyline(w, this.edgeRoute(e, from, to).pts) <= r + 2) changes.push({ k: 'edge', id: e.id, before: stripMeta(e), after: null });
+    }
+    if (!changes.length) {
+      const n = this.nodeAt(w);
+      if (n) {
+        changes.push({ k: 'node', id: n.id, before: stripMeta(n), after: null });
+        for (const e of this.doc.edges()) {
+          if (e.from === n.id || e.to === n.id) changes.push({ k: 'edge', id: e.id, before: stripMeta(e), after: null });
+        }
+      }
+    }
+    if (!changes.length) return false;
+    this.doc.commitChanges(changes, { history: false });
+    a.docChanges.push(...changes);
+    return true;
+  }
+
+  eraseInkNear(w, r, a) {
     let changed = false;
     for (let i = this.ink.length - 1; i >= 0; i--) {
       const s = this.ink[i];
@@ -932,6 +971,12 @@ export class Canvas extends EventTarget {
       this.requestRender();
       this.emit('ink', this.ink.length);
     }
+    return changed;
+  }
+
+  finishErase(a) {
+    this.hideEraser();
+    if (a.removed.length || a.docChanges.length) this.emit('erase-history', { items: a.removed, docChanges: a.docChanges });
   }
 
   showEraserAt(p) {
