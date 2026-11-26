@@ -24,6 +24,9 @@ import { debounce, el, hideToast, toast, uid } from './util.js';
 
 const $ = (id) => document.getElementById(id);
 
+// アプリを更新したら、sw.js の CACHE と一緒に変える
+export const APP_VERSION = '2026.11.26-4';
+
 const clientId = (() => {
   let id = localStorage.getItem('fc:client');
   if (!id) {
@@ -953,6 +956,21 @@ function bindPenTest() {
     else if (e.pointerType === 'pen' && (e.buttons & 32 || e.button === 5)) area.textContent = '消しゴム: 届いています';
   };
   for (const t of ['pointerdown', 'pointermove', 'pointerup']) area.addEventListener(t, onEvent);
+  // ボタンをキーボードのキーとして送るペンもあるので、キーも記録する
+  const onKey = (e) => {
+    if (!$('penTestDialog').open) return;
+    e.preventDefault();
+    lines.unshift(`${e.type} key=${e.key} code=${e.code} keyCode=${e.keyCode}`);
+    lines.length = Math.min(lines.length, 12);
+    log.textContent = lines.join('\n');
+    area.textContent = `キー「${e.key || e.code}」が届いています`;
+  };
+  window.addEventListener('keydown', onKey, true);
+  window.addEventListener('keyup', onKey, true);
+  area.addEventListener('auxclick', (e) => {
+    lines.unshift(`auxclick button=${e.button}`);
+    log.textContent = lines.join('\n');
+  });
   area.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     lines.unshift('contextmenu（長押し・右クリック相当）');
@@ -1069,8 +1087,21 @@ async function main() {
   if (target) await openBoard(target);
   else await createBoard('はじめてのボード');
 
+  $('appVersion').textContent = `バージョン ${APP_VERSION}`;
   if ('serviceWorker' in navigator && window.isSecureContext) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    const hadController = Boolean(navigator.serviceWorker.controller);
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
+    // 新しい版が入ったら、作業中でなければ読み込み直して切り替える
+    navigator.serviceWorker.addEventListener('controllerchange', async () => {
+      if (!hadController) return;
+      if (!canvas.ink.length && !canvas.editing && !canvas.action) {
+        await idbSet(`board:${doc.id}`, doc.board);
+        await sync.stop();
+        location.reload();
+      } else {
+        toast('新しい版があります。書き終わったら、アプリを開き直してください', { duration: 6000 });
+      }
+    });
   }
 }
 

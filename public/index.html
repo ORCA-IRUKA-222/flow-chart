@@ -26,6 +26,7 @@
           <label class="pen-swap" title="スタイラスペンの2つのサイドボタンの役割を入れ替える">
             <input type="checkbox" id="penSwap" /> ペンのボタンを入れ替える
           </label>
+          <span id="appVersion" class="app-version"></span>
           <button id="penTestBtn" class="btn small" title="ペンのボタンを押したときに、ブラウザに何が届いているかを確認する">ペンのボタンを確認</button>
           <button id="exportBtn" class="btn small" title="このボードを JSON ファイルに保存">書き出し</button>
           <label class="btn small" title="JSON ファイルから新しいボードを作る">
@@ -164,7 +165,10 @@
     <dialog id="penTestDialog">
       <form method="dialog">
         <p class="dialog-title">ペンのボタンを確認</p>
-        <p class="dialog-text">下の枠の上で、ペン先を少し浮かせたままサイドボタンを1つずつ押してください。届いた内容が表示されます。</p>
+        <p class="dialog-text">
+          下の枠の上で、まずペン先で枠を軽くなぞってください（ペンとして届いているかの確認）。<br />
+          次に、ペン先を少し浮かせたままサイドボタンを1つずつ押し、そのあとボタンを押したまま枠をなぞってください。
+        </p>
         <div id="penTestArea" class="pen-test-area">ここでペンを使う</div>
         <pre id="penTestLog" class="pen-test-log"></pre>
         <div class="dialog-actions">

@@ -453,12 +453,16 @@ export class Canvas extends EventTarget {
     if (e.pointerType === 'pen') {
       this.penSeen = true;
       // サイドボタンを押した瞬間（ペン先が浮いていても届く）
+      const pressed = e.buttons & ~this.penButtons;
       this.penButtons = e.buttons;
       if (e.button === 1 || e.button === 2) {
         e.preventDefault();
         this.onPenButton(e.button === 2 ? 'barrel' : 'aux');
         return;
       }
+      // ボタンを押したままペン先を付けた（浮かせた状態を検出できないペン）
+      if (pressed & 2) this.onPenButton('barrel');
+      else if (pressed & 4) this.onPenButton('aux');
       if (e.button > 2 && e.button !== 5) {
         this.emit('pen-button', { unknown: e.button });
         return;
@@ -556,8 +560,9 @@ export class Canvas extends EventTarget {
       // ペンを浮かせたままサイドボタンを押したとき、pointermove だけが届く環境もある
       const pressed = e.buttons & ~this.penButtons;
       this.penButtons = e.buttons;
-      if (!a && pressed & 2) this.onPenButton('barrel');
-      else if (!a && pressed & 4) this.onPenButton('aux');
+      // 書いている途中にボタンを押した場合も切り替える（次の線から有効）
+      if (pressed & 2) this.onPenButton('barrel');
+      else if (pressed & 4) this.onPenButton('aux');
       if (this.tool === 'eraser' || e.buttons & 32) this.showEraserAt(this.screenPoint(e));
     }
     if (!a) {
@@ -892,9 +897,18 @@ export class Canvas extends EventTarget {
     this.showEraserAt(this.screenPoint(e));
   }
 
-  /** 消しゴムが触れた手書きの線を、線ごと消す */
+  /** 消しゴムが触れた手書きの線を、線ごと消す（前回の位置からの通り道もすべて調べる） */
   eraseAt(w, a) {
     const r = ERASER_RADIUS / this.view.k;
+    const from = a.last || w;
+    a.last = w;
+    const steps = Math.max(1, Math.ceil(dist(from, w) / (r / 2)));
+    for (let i = 1; i <= steps; i++) {
+      this.eraseNear({ x: from.x + ((w.x - from.x) * i) / steps, y: from.y + ((w.y - from.y) * i) / steps }, r, a);
+    }
+  }
+
+  eraseNear(w, r, a) {
     let changed = false;
     for (let i = this.ink.length - 1; i >= 0; i--) {
       const s = this.ink[i];

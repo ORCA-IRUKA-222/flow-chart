@@ -1213,3 +1213,10 @@ dialog {
   overflow: auto;
   white-space: pre-wrap;
 }
+
+.app-version {
+  order: 99;
+  width: 100%;
+  font-size: 11px;
+  color: var(--muted);
+}

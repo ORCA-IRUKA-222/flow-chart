@@ -1,5 +1,6 @@
 // オフラインでもアプリを開けるようにするサービスワーカー（https または localhost のときだけ動く）
-const CACHE = 'flowchart-v3';
+// アプリを更新したら、js/app.js の APP_VERSION と一緒に変える
+const CACHE = 'flowchart-2026.11.26-4';
 // sw.js からの相対パス（PC のサーバーでも GitHub Pages のサブフォルダでも動くように）
 const SHELL = [
   './',
@@ -22,7 +23,13 @@ const SHELL = [
 ].map((p) => new URL(p, self.registration.scope).href);
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // ブラウザの HTTP キャッシュを通さず、必ず最新のファイルをそろえて保存する（新旧が混ざらないように）
+  e.waitUntil(
+    caches
+      .open(CACHE)
+      .then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' }))))
+      .then(() => self.skipWaiting()),
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -45,7 +52,8 @@ async function networkFirst(request) {
   const cache = await caches.open(CACHE);
   try {
     const res = await Promise.race([
-      fetch(request),
+      // 毎回サーバーに確認する（変わっていなければ 304 で軽い）
+      fetch(request, { cache: 'no-cache' }),
       new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000)),
     ]);
     if (res.ok) cache.put(request, res.clone());
