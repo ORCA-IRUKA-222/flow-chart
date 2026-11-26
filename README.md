@@ -25,7 +25,7 @@ GitHub だけで動き（アプリは GitHub Pages、データは GitHub の非�
 1. GitHub で新しいリポジトリを **Private（非公開）** で作る（名前は例: `flow-chart-data`。中身は空でよい）
 2. [Fine-grained token の作成画面](https://github.com/settings/personal-access-tokens/new)で次のように作る
    - Repository access: 「Only select repositories」で、1 のリポジトリだけを選ぶ
-   - Permissions → Repository permissions → **Contents: Read and write**
+   - Permissions の「Add permissions」を押し、検索欄に `Contents` と入れてチェック → 追加された Contents の行で「Read-only」を **「Read and write」** に変える（Metadata: Read-only は自動で付くのでそのまま）
    - 有効期限は好みで（切れたら作り直して、各端末で入れ直す）
 3. 表示されたトークン（`github_pat_…`）を控えておく
 
