@@ -1,11 +1,12 @@
 // アプリ全体のつなぎ込み: ボード一覧・同期・ツールバー・手書き整形
-import { COLORS, emptyBoard, isValidId } from '/shared/ops.js';
+import { COLORS, emptyBoard, isValidId } from '../shared/ops.js';
 import { Canvas } from './canvas.js';
 import { Doc } from './doc.js';
 import { recognizeLines } from './handwriting.js';
 import { idbDel, idbGet, idbSet } from './idb.js';
 import { alignNodes, analyzeInk, splitLines, tidyBox, unifySizes } from './recognize.js';
 import { Sync } from './sync.js';
+import { isBlockedMixedContent, normalizeServer, resolveServer, serverSetting, setServerSetting } from './config.js';
 import { rectsIntersect, snap } from './geometry.js';
 import { debounce, el, hideToast, toast, uid } from './util.js';
 
@@ -48,17 +49,18 @@ function ask(title, value = '', { type = 'text', okLabel = 'OK' } = {}) {
 }
 
 // ---------- 認証（FLOW_TOKEN が設定されているサーバーのみ） ----------
-async function ensureAuth() {
+async function ensureAuth(server) {
+  if (!server) return;
   let cfg = { auth: false };
   try {
-    cfg = await (await fetch('/api/config')).json();
+    cfg = await (await fetch(`${server}/api/config`, { signal: AbortSignal.timeout(5000) })).json();
   } catch {
     return; // オフライン
   }
   if (!cfg.auth) return;
   for (;;) {
     try {
-      const res = await fetch('/api/boards', { headers: { 'x-flow-token': state.token } });
+      const res = await fetch(`${server}/api/boards`, { headers: { 'x-flow-token': state.token } });
       if (res.status !== 401) return;
     } catch {
       return;
@@ -108,7 +110,7 @@ function boardMeta(b) {
   const parts = [];
   if (typeof b.nodeCount === 'number') parts.push(`${b.nodeCount} ノード`);
   if (b.updatedAt) parts.push(new Date(b.updatedAt).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
-  if (b.local) parts.push('未同期');
+  if (b.local && sync?.server) parts.push('未同期');
   return parts.join(' · ');
 }
 
@@ -148,11 +150,7 @@ async function renameBoard(id) {
 }
 
 function applyRename(id, name) {
-  if (!sync.rename(id, name) && !sync.localCreated[id]) {
-    toast('オフラインのため名前を変更できません', { kind: 'error' });
-    $('boardName').value = boardName(id);
-    return;
-  }
+  sync.rename(id, name);
   const b = state.boards.find((x) => x.id === id);
   if (b) b.name = name;
   if (id === state.currentId) {
@@ -165,29 +163,35 @@ function applyRename(id, name) {
 
 async function deleteBoard(id) {
   const name = boardName(id);
-  if (!confirm(`「${name}」を削除しますか？\n他の端末からも消え、元に戻せません。`)) return;
-  if (sync.localCreated[id] && !sync.online) {
-    delete sync.localCreated[id];
-    sync.persist();
-    onBoardDeleted(id);
-    return;
-  }
-  if (!sync.remove(id)) toast('オフラインのため削除できません', { kind: 'error' });
+  const msg = sync.server ? '他の端末からも消え、元に戻せません。' : 'この端末から消え、元に戻せません。';
+  if (!confirm(`「${name}」を削除しますか？\n${msg}`)) return;
+  // オフラインならこの端末からすぐ消し、削除はつながったときにサーバーへ送る
+  if (sync.remove(id)) onBoardDeleted(id, { quiet: true });
 }
 
-async function onBoardDeleted(id) {
+async function onBoardDeleted(id, { quiet = false } = {}) {
   state.boards = state.boards.filter((b) => b.id !== id);
   idbSet('boards', state.boards);
   idbDel(`board:${id}`);
   state.inkByBoard.delete(id);
   renderBoardList();
   if (id === state.currentId) {
-    toast('このボードは削除されました');
+    if (!quiet) toast('このボードは削除されました');
     state.currentId = null;
     if (state.boards.length) await openBoard(state.boards[0].id);
     else await createBoard('はじめてのボード');
   }
 }
+
+/** 一覧の表示（ノード数・更新日時）を、開いているボードに合わせて更新 */
+const touchBoardEntry = debounce(() => {
+  const b = state.boards.find((x) => x.id === doc.id);
+  if (!b) return;
+  b.nodeCount = doc.nodes().length;
+  b.updatedAt = Date.now();
+  idbSet('boards', state.boards);
+  renderBoardList();
+}, 800);
 
 // ---------- ボードを開く ----------
 const saveCache = debounce(() => {
@@ -238,12 +242,86 @@ function updateStatus() {
   const pending = sync.pendingCount();
   let label;
   let st = sync.status;
-  if (st === 'online') label = pending ? `送信中 ${pending}` : '同期済み';
+  if (st === 'local') label = 'この端末のみ';
+  else if (st === 'online') label = pending ? `送信中 ${pending}` : '同期済み';
   else if (st === 'connecting') label = '接続中…';
   else label = pending ? `オフライン（未送信 ${pending}）` : 'オフライン';
   s.dataset.state = st;
   s.querySelector('span').textContent = label;
-  s.title = st === 'online' ? 'サーバーと同期しています' : '接続が戻ると自動で同期します';
+  s.title =
+    st === 'local'
+      ? 'この端末だけに保存しています。押すと同期先を設定できます'
+      : st === 'online'
+        ? `${sync.server} と同期しています`
+        : '接続が戻ると自動で同期します（押すと同期先を変更できます）';
+}
+
+// ---------- 同期の設定 ----------
+/** ボードの中身を op の列にする（まだサーバーにないボードを送るとき） */
+function boardToOps(board) {
+  const ops = [];
+  for (const k of ['node', 'edge']) {
+    const coll = (k === 'node' ? board.nodes : board.edges) || {};
+    for (const id in coll) {
+      const e = coll[id];
+      const { u, c, deleted, id: _id, ...v } = e;
+      ops.push(deleted ? { t: 'del', k, id, u, c } : { t: 'put', k, id, v, u, c });
+    }
+  }
+  return ops;
+}
+
+async function uploadBoards(ids) {
+  for (const id of ids) {
+    const board = id === doc.id ? doc.board : await idbGet(`board:${id}`);
+    if (!board) continue;
+    const ops = boardToOps(board);
+    for (let i = 0; i < ops.length; i += 2000) {
+      sync.raw({ type: 'ops', boardId: id, bid: uid(), ops: ops.slice(i, i + 2000) });
+    }
+  }
+}
+
+function openSyncDialog() {
+  const dlg = $('syncDialog');
+  const input = $('syncInput');
+  const setting = serverSetting();
+  input.value = setting ?? (sync.server && sync.server !== location.origin ? sync.server : '');
+  $('syncCurrent').textContent = sync.server ? `現在の同期先: ${sync.server}` : '現在: この端末だけに保存しています';
+  $('syncError').textContent = '';
+  dlg.returnValue = '';
+  dlg.showModal();
+}
+
+async function saveSyncSetting(raw) {
+  let origin = '';
+  try {
+    origin = normalizeServer(raw);
+  } catch {
+    $('syncError').textContent = 'アドレスの形式が正しくありません';
+    return false;
+  }
+  if (origin && isBlockedMixedContent(origin)) {
+    $('syncError').textContent = 'このページは https なので、http のサーバーには接続できません。https のアドレスを指定してください（README の「同期サーバーを https で公開する」を参照）';
+    return false;
+  }
+  if (origin) {
+    try {
+      const res = await fetch(`${origin}/api/config`, { signal: AbortSignal.timeout(5000) });
+      if (!res.ok) throw new Error(String(res.status));
+    } catch {
+      if (!confirm(`${origin} に今は接続できません。\nこのまま保存すると、つながったときに同期します。保存しますか？`)) return false;
+    }
+  }
+  // 今この端末にあるボードは、新しい同期先へまるごと送る
+  for (const b of state.boards) if (!sync.localCreated[b.id]) sync.localCreated[b.id] = b.name;
+  sync.persist();
+  setServerSetting(origin);
+  await ensureAuth(origin || null);
+  sync.setServer(origin || null, state.token);
+  renderBoardList();
+  toast(origin ? `${origin} と同期します` : 'この端末だけで使います');
+  return true;
 }
 
 // ---------- 手書き整形（OCR） ----------
@@ -276,7 +354,7 @@ async function runOCR() {
     let recog = { results: [], ok: true };
     if (lines.length) {
       toast('文字を認識しています…', { duration: 0 });
-      recog = await recognizeLines(lines, { k: ks[Math.floor(ks.length / 2)], token: state.token });
+      recog = await recognizeLines(lines, { k: ks[Math.floor(ks.length / 2)], token: state.token, server: sync.server });
       hideToast();
     }
     if (doc.id !== boardId) return;
@@ -588,6 +666,16 @@ function bindUI() {
   });
   $('fitBtn').addEventListener('click', () => canvas.fit());
   $('exportBtn').addEventListener('click', exportBoard);
+  $('status').addEventListener('click', openSyncDialog);
+  $('syncBtn').addEventListener('click', openSyncDialog);
+  $('syncDialog').addEventListener('close', () => {});
+  $('syncForm').addEventListener('submit', async (e) => {
+    const action = e.submitter?.value;
+    if (action === 'cancel') return;
+    e.preventDefault();
+    const value = action === 'local' ? '' : $('syncInput').value;
+    if (await saveSyncSetting(value)) $('syncDialog').close();
+  });
   $('importInput').addEventListener('change', (e) => {
     const f = e.target.files?.[0];
     if (f) importBoard(f);
@@ -674,10 +762,13 @@ async function main() {
     $('app').classList.add('sidebar-closed');
   }
   setTool('select');
-  await ensureAuth();
+  const server = await resolveServer();
+  if (server && isBlockedMixedContent(server)) toast('同期先が http のため接続できません。同期の設定を確認してください', { kind: 'error', duration: 6000 });
+  await ensureAuth(server);
 
-  sync = new Sync({ token: state.token });
+  sync = new Sync({ token: state.token, server });
   await sync.init();
+  sync.addEventListener('open', (e) => uploadBoards(e.detail));
   sync.addEventListener('status', updateStatus);
   sync.addEventListener('pending', updateStatus);
   sync.addEventListener('boards', (e) => setBoards(e.detail));
@@ -702,6 +793,7 @@ async function main() {
   doc.addEventListener('change', (e) => {
     const { ops, local } = e.detail;
     if (local && ops.length) sync.send(doc.id, ops);
+    if (ops.length) touchBoardEntry();
     saveCache();
     updateUndo();
     if (!e.detail.reset) updateHint();
@@ -718,7 +810,7 @@ async function main() {
   const last = localStorage.getItem('fc:lastBoard');
   let target = state.boards.find((b) => b.id === last)?.id || (last && (await idbGet(`board:${last}`)) ? last : null);
   if (!target && state.boards.length) target = state.boards[0].id;
-  if (!target) {
+  if (!target && sync.server) {
     const list = await new Promise((resolve) => {
       const timer = setTimeout(() => resolve(null), 2500);
       sync.addEventListener(
@@ -736,7 +828,7 @@ async function main() {
   else await createBoard('はじめてのボード');
 
   if ('serviceWorker' in navigator && window.isSecureContext) {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.register('sw.js').catch(() => {});
   }
 }
 

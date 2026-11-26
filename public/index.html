@@ -8,10 +8,10 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="フローチャート" />
     <title>フローチャート</title>
-    <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="/icon.svg" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="icon.svg" />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <div id="app">
@@ -22,6 +22,7 @@
         </div>
         <ul id="boardList" class="board-list"></ul>
         <div class="side-foot">
+          <button id="syncBtn" class="btn small" title="同期先のサーバーを設定">同期の設定</button>
           <button id="exportBtn" class="btn small" title="このボードを JSON ファイルに保存">書き出し</button>
           <label class="btn small" title="JSON ファイルから新しいボードを作る">
             読み込み<input type="file" id="importInput" accept=".json,application/json" hidden />
@@ -48,7 +49,7 @@
             </div>
             <button id="ocrBtn" class="btn primary" title="手書きの図形・矢印・文字を清書する">
               <svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8zM18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9z" /></svg>
-              <span>整形 OCR</span><span id="inkCount" class="badge" hidden>0</span>
+              <span>整形<span class="ocr-sub"> OCR</span></span><span id="inkCount" class="badge" hidden>0</span>
             </button>
             <button id="clearInk" class="icon-btn" title="手書きを消す" aria-label="手書きを消す">
               <svg viewBox="0 0 24 24"><path d="M7 21h10M5 15l7-11 7 7-7 9H8z" /></svg>
@@ -75,7 +76,7 @@
               <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
             </button>
           </div>
-          <span id="status" class="status" data-state="connecting" title="同期の状態"><i></i><span>接続中</span></span>
+          <button id="status" class="status" data-state="connecting" title="同期の状態（押すと同期先を設定）"><i></i><span>接続中</span></button>
         </header>
 
         <div id="viewport" tabindex="0" aria-label="キャンバス"></div>
@@ -98,6 +99,25 @@
       </form>
     </dialog>
 
-    <script type="module" src="/js/app.js"></script>
+    <dialog id="syncDialog">
+      <form method="dialog" id="syncForm">
+        <p class="dialog-title">同期の設定</p>
+        <p class="dialog-text">
+          同期先がなくても、この端末だけで使えます（データは端末に保存されます）。<br />
+          同期サーバーのアドレスを入れると、この端末のボードをそこへ送り、他の端末と同期します。
+        </p>
+        <input id="syncInput" type="url" inputmode="url" autocomplete="off" placeholder="例: https://my-pc.example.ts.net" />
+        <p id="syncCurrent" class="dialog-note"></p>
+        <p id="syncError" class="dialog-error"></p>
+        <div class="dialog-actions wrap">
+          <button value="local" class="btn">この端末だけで使う</button>
+          <span class="spacer"></span>
+          <button value="cancel" class="btn" formnovalidate>キャンセル</button>
+          <button value="ok" class="btn primary">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="js/app.js"></script>
   </body>
 </html>

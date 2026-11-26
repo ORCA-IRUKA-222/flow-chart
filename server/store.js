@@ -1,7 +1,7 @@
 // ボードを JSON ファイルとして保存・読み込みする。
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { applyOp, boardSummary, emptyBoard, isValidId, pruneTombstones } from '../shared/ops.js';
+import { applyOp, boardSummary, emptyBoard, isValidId, pruneTombstones } from '../public/shared/ops.js';
 
 const SAVE_DELAY_MS = 400;
 

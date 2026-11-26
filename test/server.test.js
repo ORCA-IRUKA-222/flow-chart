@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
 import { createServer } from '../server/index.js';
-import { applyOp, emptyBoard } from '../shared/ops.js';
+import { applyOp, emptyBoard } from '../public/shared/ops.js';
 import { normalizeItems, parseResponse } from '../server/handwriting.js';
 
 function client(port, token = '') {
@@ -139,6 +139,26 @@ test('文字認識の中継: 入力の検証と、結果の取り出し', async 
       body: JSON.stringify({ items: [{ w: 100, h: 50, ink: [[[1, 2], [3, 4]]] }] }),
     });
     assert.deepEqual(await res.json(), { results: ['はい'] });
+  } finally {
+    await app.close();
+    await rm(app.dir, { recursive: true, force: true });
+  }
+});
+
+test('別の場所（GitHub Pages など）から開いたアプリも API を使える（CORS）', async () => {
+  const app = await start();
+  try {
+    const pre = await fetch(`http://127.0.0.1:${app.port}/api/recognize`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://example.github.io', 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type,x-flow-token' },
+    });
+    assert.equal(pre.status, 204);
+    assert.equal(pre.headers.get('access-control-allow-origin'), '*');
+    assert.match(pre.headers.get('access-control-allow-headers'), /X-Flow-Token/i);
+    const res = await fetch(`http://127.0.0.1:${app.port}/api/config`, { headers: { Origin: 'https://example.github.io' } });
+    assert.equal(res.headers.get('access-control-allow-origin'), '*');
+    const page = await fetch(`http://127.0.0.1:${app.port}/shared/ops.js`);
+    assert.equal(page.status, 200);
   } finally {
     await app.close();
     await rm(app.dir, { recursive: true, force: true });

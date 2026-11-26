@@ -52,15 +52,45 @@ export function toInk(line, k = 1) {
   };
 }
 
+const GOOGLE_ENDPOINT = 'https://inputtools.google.com/request?ime=handwriting&app=flowchart&dbg=0&cs=1&oe=UTF-8';
+
+/** 端末から直接 Google の手書き入力サービスに問い合わせる（同期サーバーがないとき） */
+async function recognizeDirect(item, lang) {
+  const res = await fetch(GOOGLE_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      options: 'enable_pre_space',
+      requests: [
+        {
+          writing_guide: { writing_area_width: item.w, writing_area_height: item.h },
+          ink: item.ink,
+          language: lang,
+          max_num_results: 3,
+          max_completions: 0,
+        },
+      ],
+    }),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) throw new Error(String(res.status));
+  const json = await res.json();
+  const cands = json?.[0] === 'SUCCESS' ? json[1]?.[0]?.[1] : null;
+  return Array.isArray(cands) && typeof cands[0] === 'string' ? cands[0] : null;
+}
+
 /**
  * 複数の行をまとめて認識する。
+ * 順番: ブラウザ内蔵の認識 → 同期サーバー経由 → 端末から直接
  * @param lines  [[stroke points...], ...]
- * @returns 各行の文字列（認識できなければ null）
+ * @returns 各行の文字列（認識できなければ null）と、認識サービスに届いたか
  */
-export async function recognizeLines(lines, { lang = 'ja', k = 1, token = '' } = {}) {
+export async function recognizeLines(lines, { lang = 'ja', k = 1, token = '', server = null } = {}) {
   const results = new Array(lines.length).fill(null);
+  let reached = false;
   const rec = await nativeRecognizer(lang);
   if (rec) {
+    reached = true;
     await Promise.all(
       lines.map(async (line, i) => {
         try {
@@ -71,19 +101,33 @@ export async function recognizeLines(lines, { lang = 'ja', k = 1, token = '' } =
       }),
     );
   }
-  const rest = results.map((r, i) => (r ? -1 : i)).filter((i) => i >= 0);
-  if (!rest.length) return { results, ok: true };
-  try {
-    const res = await fetch('/api/recognize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { 'x-flow-token': token } : {}) },
-      body: JSON.stringify({ lang, items: rest.map((i) => toInk(lines[i], k)) }),
-    });
-    if (!res.ok) throw new Error(String(res.status));
-    const json = await res.json();
-    rest.forEach((i, j) => (results[i] = json.results?.[j] || null));
-    return { results, ok: true };
-  } catch {
-    return { results, ok: Boolean(rec) };
+  const todo = () => results.map((r, i) => (r ? -1 : i)).filter((i) => i >= 0);
+  let rest = todo();
+  if (rest.length && server) {
+    try {
+      const res = await fetch(`${server}/api/recognize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { 'x-flow-token': token } : {}) },
+        body: JSON.stringify({ lang, items: rest.map((i) => toInk(lines[i], k)) }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      const json = await res.json();
+      rest.forEach((i, j) => (results[i] = json.results?.[j] || null));
+      reached = true;
+    } catch {
+      // サーバーに届かない → 端末から直接試す
+    }
   }
+  rest = reached ? [] : todo();
+  if (rest.length) {
+    const settled = await Promise.allSettled(rest.map((i) => recognizeDirect(toInk(lines[i], k), lang)));
+    settled.forEach((r, j) => {
+      if (r.status === 'fulfilled') {
+        reached = true;
+        results[rest[j]] = r.value;
+      }
+    });
+  }
+  return { results, ok: reached };
 }

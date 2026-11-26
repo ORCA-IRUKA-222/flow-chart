@@ -1,5 +1,5 @@
 // 開いているボードの状態と、変更（トランザクション）・元に戻す/やり直しを管理する。
-import { applyOp, emptyBoard, live } from '/shared/ops.js';
+import { applyOp, emptyBoard, live } from '../shared/ops.js';
 
 /** 端末の時計がずれていても単調増加する論理時刻 */
 class Clock {

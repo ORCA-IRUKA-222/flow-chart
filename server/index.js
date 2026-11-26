@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { BoardStore } from './store.js';
 import { normalizeItems, recognizeHandwriting } from './handwriting.js';
-import { boardSummary, isValidId } from '../shared/ops.js';
+import { boardSummary, isValidId } from '../public/shared/ops.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.PORT) || 8787;
@@ -31,10 +31,7 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-const STATIC_ROOTS = [
-  { prefix: '/shared/', dir: path.join(ROOT, 'shared') },
-  { prefix: '/', dir: path.join(ROOT, 'public') },
-];
+const STATIC_ROOTS = [{ prefix: '/', dir: path.join(ROOT, 'public') }];
 
 export async function createServer({ dataDir = DATA_DIR, token = TOKEN, recognize = recognizeHandwriting } = {}) {
   const store = new BoardStore(dataDir);
@@ -51,7 +48,19 @@ export async function createServer({ dataDir = DATA_DIR, token = TOKEN, recogniz
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://localhost');
-      if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
+      if (url.pathname.startsWith('/api/')) {
+        // GitHub Pages など、別の場所から開いたアプリからも使えるようにする（認証は合言葉で行う）
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Flow-Token');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Private-Network', 'true');
+        res.setHeader('Access-Control-Max-Age', '86400');
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204);
+          return res.end();
+        }
+        return await handleApi(req, res, url);
+      }
       return await serveStatic(req, res, url);
     } catch (err) {
       console.error(err);

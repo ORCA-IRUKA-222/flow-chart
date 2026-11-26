@@ -197,6 +197,7 @@ svg {
 
 .side-foot {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--border);
@@ -423,6 +424,11 @@ svg {
 }
 
 .status {
+  border: none;
+  background: transparent;
+  padding: 6px 4px;
+  border-radius: 6px;
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -437,6 +443,14 @@ svg {
   height: 8px;
   border-radius: 50%;
   background: #c9a227;
+}
+
+.status:hover {
+  background: var(--bg);
+}
+
+.status[data-state='local'] i {
+  background: var(--muted);
 }
 
 .status[data-state='online'] i {
@@ -454,6 +468,44 @@ svg {
   }
   .board-name {
     width: 110px;
+  }
+}
+
+/* スマホ: 上部バーを2段にし、ズームボタンは省く（ピンチで拡大・縮小） */
+@media (max-width: 640px) {
+  #topbar {
+    flex-wrap: wrap;
+    height: auto;
+    row-gap: 2px;
+    padding-bottom: 6px;
+  }
+  #menuBtn,
+  .board-name,
+  .status {
+    height: 44px;
+  }
+  .board-name {
+    flex: 1;
+    width: auto;
+  }
+  .toolbar {
+    order: 3;
+    flex-basis: 100%;
+    justify-content: space-between;
+    gap: 2px;
+  }
+  #zoomOut,
+  #zoomIn,
+  #zoomLabel,
+  .toolbar .divider,
+  .ocr-sub {
+    display: none;
+  }
+  .toolbar .icon-btn {
+    width: 40px;
+  }
+  .hint {
+    top: calc(var(--topbar-h) * 2 + env(safe-area-inset-top) + 8px);
   }
 }
 
@@ -874,7 +926,7 @@ dialog {
   background: var(--panel);
   color: var(--text);
   padding: 18px;
-  width: min(380px, calc(100% - 32px));
+  width: min(440px, calc(100% - 32px));
   box-shadow: var(--shadow);
 }
 
@@ -888,6 +940,45 @@ dialog::backdrop {
 }
 
 #dialogInput {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 16px;
+}
+
+.dialog-text,
+.dialog-note,
+.dialog-error {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.dialog-note {
+  margin: 8px 0 0;
+}
+
+.dialog-error {
+  margin: 6px 0 0;
+  color: var(--danger);
+}
+
+.dialog-error:empty {
+  display: none;
+}
+
+.dialog-actions .spacer {
+  flex: 1;
+}
+
+.dialog-actions.wrap {
+  flex-wrap: wrap;
+}
+
+#syncInput {
   width: 100%;
   border: 1px solid var(--border);
   background: var(--bg);

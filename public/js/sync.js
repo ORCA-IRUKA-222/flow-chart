@@ -2,19 +2,22 @@
 // 送信待ちの変更は端末内に保存しておき、オフラインから戻ったときに自動で送る。
 import { idbGet, idbSet } from './idb.js';
 import { debounce, uid } from './util.js';
+import { wsUrl } from './config.js';
 
 const FLUSH_MS = 40;
 
 export class Sync extends EventTarget {
-  constructor({ token = '' } = {}) {
+  constructor({ token = '', server = null } = {}) {
     super();
     this.token = token;
+    this.server = server; // 同期先の origin。null なら同期しない（この端末だけ）
     this.ws = null;
     this.status = 'offline';
     this.boardId = null;
     this.boardName = '';
     this.pending = []; // [{ bid, boardId, ops }]
     this.localCreated = {}; // オフライン中に作ったボード { id: name }
+    this.queued = { renames: {}, deletes: [] }; // オフライン中のボード名変更・削除
     this.outbox = new Map(); // boardId -> ops
     this.outboxTimer = null;
     this.retryMs = 1000;
@@ -25,11 +28,13 @@ export class Sync extends EventTarget {
   async init() {
     this.pending = (await idbGet('pending')) || [];
     this.localCreated = (await idbGet('localCreated')) || {};
+    this.queued = (await idbGet('queuedBoardOps')) || { renames: {}, deletes: [] };
   }
 
   async save() {
     await idbSet('pending', this.pending);
     await idbSet('localCreated', this.localCreated);
+    await idbSet('queuedBoardOps', this.queued);
   }
 
   emit(type, detail) {
@@ -45,14 +50,28 @@ export class Sync extends EventTarget {
     return this.ws && this.ws.readyState === WebSocket.OPEN;
   }
 
+  /** 同期先を変える（null で同期しない） */
+  setServer(server, token = this.token) {
+    this.server = server;
+    this.token = token;
+    const old = this.ws;
+    this.ws = null;
+    old?.close();
+    clearTimeout(this.retryTimer);
+    this.retryMs = 1000;
+    this.connect();
+  }
+
   connect() {
     clearTimeout(this.retryTimer);
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const q = this.token ? `?token=${encodeURIComponent(this.token)}` : '';
+    if (!this.server) {
+      this.setStatus('local');
+      return;
+    }
     this.setStatus('connecting');
     let ws;
     try {
-      ws = new WebSocket(`${proto}://${location.host}/ws${q}`);
+      ws = new WebSocket(wsUrl(this.server, this.token));
     } catch {
       this.scheduleReconnect();
       return;
@@ -62,7 +81,13 @@ export class Sync extends EventTarget {
       this.retryMs = 1000;
       this.setStatus('online');
       for (const [id, name] of Object.entries(this.localCreated)) this.raw({ type: 'ensure', boardId: id, name });
+      // まだサーバーにないボードは、中身をまるごと送る（端末だけで作ったボード）
+      this.emit('open', Object.keys(this.localCreated));
       for (const batch of this.pending) this.raw({ type: 'ops', ...batch });
+      for (const [id, name] of Object.entries(this.queued.renames)) this.raw({ type: 'rename', boardId: id, name });
+      for (const id of this.queued.deletes) this.raw({ type: 'delete', boardId: id });
+      this.queued = { renames: {}, deletes: [] };
+      this.persist();
       if (this.boardId) this.raw({ type: 'join', boardId: this.boardId, name: this.boardName });
     };
     ws.onmessage = (ev) => {
@@ -91,7 +116,7 @@ export class Sync extends EventTarget {
 
   /** 画面に戻ったときなど、すぐに再接続を試す */
   reconnectNow() {
-    if (!this.ws) {
+    if (!this.ws && this.server) {
       this.retryMs = 1000;
       this.connect();
     }
@@ -152,19 +177,25 @@ export class Sync extends EventTarget {
     this.raw({ type: 'ensure', boardId, name });
   }
 
+  /** ボード名の変更。オフラインなら接続時に送る */
   rename(boardId, name) {
-    if (this.localCreated[boardId]) {
-      this.localCreated[boardId] = name;
-      this.persist();
-    }
-    if (!this.online) return false;
-    this.raw({ type: 'rename', boardId, name });
-    return true;
+    if (this.localCreated[boardId]) this.localCreated[boardId] = name;
+    if (this.online) this.raw({ type: 'rename', boardId, name });
+    else this.queued.renames[boardId] = name;
+    this.persist();
   }
 
+  /** ボードの削除。オフラインなら接続時に送る。戻り値: すぐ削除が確定したか */
   remove(boardId) {
-    if (!this.online) return false;
-    this.raw({ type: 'delete', boardId });
+    if (this.online) {
+      this.raw({ type: 'delete', boardId });
+      return false; // サーバーからの board-deleted を待つ
+    }
+    delete this.localCreated[boardId];
+    delete this.queued.renames[boardId];
+    if (!this.queued.deletes.includes(boardId)) this.queued.deletes.push(boardId);
+    this.pending = this.pending.filter((b) => b.boardId !== boardId);
+    this.persist();
     return true;
   }
 
