@@ -13,6 +13,8 @@
   --node-stroke: #3b4252;
   --edge: #4a5366;
   --ink: #1f4fd1;
+  --ink-text: #1d2330;
+  --ink-shape: #1f5fe0;
   --shadow: 0 1px 2px rgba(20, 30, 50, 0.08), 0 4px 14px rgba(20, 30, 50, 0.08);
   --topbar-h: 52px;
   --sidebar-w: 248px;
@@ -51,6 +53,8 @@
     --node-stroke: #c6ccd8;
     --edge: #aab2c2;
     --ink: #7fa3ff;
+    --ink-text: #eef1f6;
+    --ink-shape: #7fa3ff;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 14px rgba(0, 0, 0, 0.3);
     --c-blue-fill: #1f2d4d;
     --c-blue-stroke: #7aa0f7;
@@ -406,6 +410,48 @@ svg {
   font-weight: 600;
 }
 
+.tool .accent {
+  stroke-width: 2.2;
+}
+
+.tool-text .accent {
+  stroke: var(--ink-text);
+}
+
+.tool-shape .accent {
+  stroke: var(--ink-shape);
+}
+
+.seg .tool-text.active {
+  background: color-mix(in srgb, var(--ink-text) 12%, var(--panel));
+  color: var(--ink-text);
+}
+
+.eraser-cursor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+  border-radius: 50%;
+  border: 2px solid var(--muted);
+  background: color-mix(in srgb, var(--panel) 50%, transparent);
+  pointer-events: none;
+  display: none;
+  z-index: 5;
+}
+
+.pen-swap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  width: 100%;
+  cursor: pointer;
+}
+
 .badge {
   background: rgba(255, 255, 255, 0.28);
   border-radius: 10px;
@@ -502,7 +548,10 @@ svg {
     display: none;
   }
   .toolbar .icon-btn {
-    width: 40px;
+    width: 38px;
+  }
+  .seg .tool {
+    padding: 0 8px;
   }
   .hint {
     top: calc(var(--topbar-h) * 2 + env(safe-area-inset-top) + 8px);
@@ -525,8 +574,13 @@ svg {
   cursor: default;
 }
 
-.viewport[data-tool='draw'] {
+.viewport[data-tool='text'],
+.viewport[data-tool='shape'] {
   cursor: crosshair;
+}
+
+.viewport[data-tool='eraser'] {
+  cursor: none;
 }
 
 .world {
@@ -540,6 +594,7 @@ svg {
 
 .edges-layer {
   position: absolute;
+  z-index: 0;
   overflow: visible;
   pointer-events: none;
 }
@@ -583,6 +638,16 @@ svg {
   top: 0;
 }
 
+/* ノードの z-index が外に漏れないようにし、手書きを常にいちばん上に描く */
+.nodes-layer {
+  z-index: 1;
+  isolation: isolate;
+}
+
+.labels-layer {
+  z-index: 2;
+}
+
 .node {
   position: absolute;
   left: 0;
@@ -592,8 +657,10 @@ svg {
   --stroke: var(--node-stroke);
 }
 
-.viewport[data-tool='draw'] .node {
-  cursor: crosshair;
+.viewport:not([data-tool='select']) .node,
+.viewport:not([data-tool='select']) .edge .hit,
+.viewport:not([data-tool='select']) .edge-label {
+  cursor: inherit;
 }
 
 .node .shape {
@@ -735,6 +802,7 @@ svg {
 
 .ink-layer {
   position: absolute;
+  z-index: 3;
   left: 0;
   top: 0;
   overflow: visible;
@@ -743,6 +811,19 @@ svg {
 
 .ink {
   fill: none;
+  stroke: var(--ink);
+  stroke-linecap: round;
+}
+
+.ink-text {
+  stroke: var(--ink-text);
+}
+
+.ink-shape {
+  stroke: var(--ink-shape);
+}
+
+.ink-any {
   stroke: var(--ink);
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -827,7 +908,8 @@ svg {
 .selbar {
   position: absolute;
   left: 50%;
-  bottom: calc(16px + env(safe-area-inset-bottom));
+  /* 左下の「元に戻す・拡大縮小」と重ならないよう、その上に出す */
+  bottom: calc(72px + env(safe-area-inset-bottom));
   transform: translateX(-50%);
   display: flex;
   align-items: center;
@@ -896,7 +978,7 @@ svg {
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(104px + env(safe-area-inset-bottom));
+  bottom: calc(140px + env(safe-area-inset-bottom));
   transform: translate(-50%, 20px);
   background: #222834;
   color: #fff;
@@ -1077,4 +1159,31 @@ dialog {
 
 .status[data-state='error'] i {
   background: var(--danger);
+}
+
+/* 元に戻す・拡大縮小（左下に浮かべる） */
+.floatbar {
+  position: absolute;
+  left: 12px;
+  bottom: calc(14px + env(safe-area-inset-bottom));
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  z-index: 14;
+}
+
+/* 上部バーが入りきらない幅では、表示を詰める */
+@media (max-width: 1280px) {
+  .board-name {
+    width: 130px;
+  }
+  .status span,
+  .ocr-sub {
+    display: none;
+  }
 }

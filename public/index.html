@@ -22,7 +22,10 @@
         </div>
         <ul id="boardList" class="board-list"></ul>
         <div class="side-foot">
-          <button id="syncBtn" class="btn small" title="同期先のサーバーを設定">同期の設定</button>
+          <button id="syncBtn" class="btn small" title="同期先を設定">同期の設定</button>
+          <label class="pen-swap" title="スタイラスペンの2つのサイドボタンの役割を入れ替える">
+            <input type="checkbox" id="penSwap" /> ペンのボタンを入れ替える
+          </label>
           <button id="exportBtn" class="btn small" title="このボードを JSON ファイルに保存">書き出し</button>
           <label class="btn small" title="JSON ファイルから新しいボードを作る">
             読み込み<input type="file" id="importInput" accept=".json,application/json" hidden />
@@ -39,41 +42,30 @@
           <input id="boardName" class="board-name" aria-label="ボード名" spellcheck="false" />
 
           <div class="toolbar" role="toolbar" aria-label="ツール">
-            <div class="seg">
-              <button data-tool="select" class="tool" title="選択・移動（V）">
+            <div class="seg" role="radiogroup" aria-label="ツール">
+              <button data-tool="select" class="tool" title="選択（V）: ノードを動かす・つなぐ・編集する" aria-label="選択">
                 <svg viewBox="0 0 24 24"><path d="M5 3l13 8-6 1.5L9 19z" /></svg><span>選択</span>
               </button>
-              <button data-tool="draw" class="tool" title="ペンで手書き（P）">
-                <svg viewBox="0 0 24 24"><path d="M4 20l4-1 11-11-3-3L5 16zM14 6l3 3" /></svg><span>ペン</span>
+              <button data-tool="text" class="tool tool-text" title="文字ペン（T）: 文字を書く" aria-label="文字ペン">
+                <svg viewBox="0 0 24 24"><path d="M3 20l3-1 9-9-2-2-9 9zM12 7l2 2" /><path d="M15 19h6M18 13v6" class="accent" /></svg><span>文字</span>
+              </button>
+              <button data-tool="shape" class="tool tool-shape" title="図形ペン（G）: 四角・ひし形・丸・矢印を書く" aria-label="図形ペン">
+                <svg viewBox="0 0 24 24"><path d="M3 20l3-1 9-9-2-2-9 9zM12 7l2 2" /><rect x="15" y="13" width="6" height="6" rx="1" class="accent" /></svg><span>図形</span>
+              </button>
+              <button data-tool="eraser" class="tool" title="消しゴム（E）: なぞった手書きを消す" aria-label="消しゴム">
+                <svg viewBox="0 0 24 24"><path d="M8 20h12M4 15l8-10 7 6-7 9H8z" /><path d="M8 10l7 6" /></svg><span>消す</span>
               </button>
             </div>
             <button id="ocrBtn" class="btn primary" title="手書きの図形・矢印・文字を清書する">
               <svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8zM18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9z" /></svg>
               <span>整形<span class="ocr-sub"> OCR</span></span><span id="inkCount" class="badge" hidden>0</span>
             </button>
-            <button id="clearInk" class="icon-btn" title="手書きを消す" aria-label="手書きを消す">
-              <svg viewBox="0 0 24 24"><path d="M7 21h10M5 15l7-11 7 7-7 9H8z" /></svg>
+            <button id="clearInk" class="icon-btn" title="手書きをすべて消す" aria-label="手書きをすべて消す">
+              <svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
             </button>
             <span class="divider"></span>
             <button id="addNode" class="icon-btn" title="ノードを追加（キャンバスをダブルタップでも追加）" aria-label="ノードを追加">
               <svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="2" /><path d="M12 9v6M9 12h6" /></svg>
-            </button>
-            <button id="undoBtn" class="icon-btn" title="元に戻す（Ctrl+Z）" aria-label="元に戻す">
-              <svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5M4 9h10a6 6 0 010 12h-3" /></svg>
-            </button>
-            <button id="redoBtn" class="icon-btn" title="やり直す（Ctrl+Shift+Z）" aria-label="やり直す">
-              <svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5M20 9H10a6 6 0 000 12h3" /></svg>
-            </button>
-            <span class="divider"></span>
-            <button id="zoomOut" class="icon-btn" title="縮小" aria-label="縮小">
-              <svg viewBox="0 0 24 24"><path d="M6 12h12" /></svg>
-            </button>
-            <button id="zoomLabel" class="zoom-label" title="100% に戻す">100%</button>
-            <button id="zoomIn" class="icon-btn" title="拡大" aria-label="拡大">
-              <svg viewBox="0 0 24 24"><path d="M6 12h12M12 6v12" /></svg>
-            </button>
-            <button id="fitBtn" class="icon-btn" title="全体を表示（F）" aria-label="全体を表示">
-              <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
             </button>
           </div>
           <button id="status" class="status" data-state="connecting" title="同期の状態（押すと同期先を設定）"><i></i><span>接続中</span></button>
@@ -81,6 +73,24 @@
 
         <div id="viewport" tabindex="0" aria-label="キャンバス"></div>
 
+        <div class="floatbar" role="toolbar" aria-label="元に戻す・表示">
+          <button id="undoBtn" class="icon-btn" title="元に戻す（Ctrl+Z）" aria-label="元に戻す">
+            <svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5M4 9h10a6 6 0 010 12h-3" /></svg>
+          </button>
+          <button id="redoBtn" class="icon-btn" title="やり直す（Ctrl+Shift+Z）" aria-label="やり直す">
+            <svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5M20 9H10a6 6 0 000 12h3" /></svg>
+          </button>
+          <button id="zoomOut" class="icon-btn" title="縮小" aria-label="縮小">
+            <svg viewBox="0 0 24 24"><path d="M6 12h12" /></svg>
+          </button>
+          <button id="zoomLabel" class="zoom-label" title="100% に戻す">100%</button>
+          <button id="zoomIn" class="icon-btn" title="拡大" aria-label="拡大">
+            <svg viewBox="0 0 24 24"><path d="M6 12h12M12 6v12" /></svg>
+          </button>
+          <button id="fitBtn" class="icon-btn" title="全体を表示（F）" aria-label="全体を表示">
+            <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
+          </button>
+        </div>
         <div id="selbar" class="selbar" hidden></div>
         <div id="hint" class="hint"></div>
       </main>

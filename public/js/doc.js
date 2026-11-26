@@ -142,6 +142,7 @@ export class Doc extends EventTarget {
     this.undoStack.push(useful);
     if (this.undoStack.length > HISTORY_LIMIT) this.undoStack.shift();
     this.redoStack = [];
+    this.dispatchEvent(new CustomEvent('history'));
   }
 
   undo() {

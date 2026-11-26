@@ -228,6 +228,7 @@ async function openBoard(id) {
   const cached = (await idbGet(`board:${id}`)) || emptyBoard(id, name);
   if (state.currentId !== id) return;
   doc.load(cached);
+  resetHistory();
   doc.applyRemote(sync.pendingOps(id));
   canvas.setInk(state.inkByBoard.get(id) || []);
   $('boardName').value = name;
@@ -545,8 +546,16 @@ async function runOCR() {
       textCount++;
     });
 
-    if (tx.size) tx.commit();
-    canvas.setInk(strokes.filter((_, i) => keepStrokes.has(i)));
+    // 整形は「図の変更」と「手書きが消えたこと」を1回の操作として元に戻せるようにする
+    let committed = false;
+    if (tx.size) {
+      suppressDocHistory = true;
+      committed = tx.commit().length > 0;
+      suppressDocHistory = false;
+    }
+    const after = strokes.filter((_, i) => keepStrokes.has(i));
+    canvas.setInk(after);
+    pushHistory({ doc: committed, ink: { type: 'replace', before: strokes, after } });
     if (shapeNodes.length) canvas.select(shapeNodes.map((n) => n.id));
 
     const recognizedTexts = result.texts.length - failed.length;
@@ -711,28 +720,72 @@ function toggleSidebar(open) {
   setTimeout(() => canvas.requestRender(), 220);
 }
 
+const TOOL_INFO = {
+  select: { name: '選択', hint: 'ノードを動かす・つなぐ・編集する。ペンでなぞると範囲選択、指でドラッグすると画面の移動' },
+  text: { name: '文字ペン', hint: '文字を書く（黒）。ノードの中に書くとそのノードの文字、線の近くに書くと線のラベルになります' },
+  shape: { name: '図形ペン', hint: '四角・角丸・ひし形・丸・平行四辺形の枠と、つなぐ線を書く（青）' },
+  eraser: { name: '消しゴム', hint: 'なぞった手書きの線を消します' },
+};
+
+let toolHintUntil = 0;
+
 function setTool(tool) {
   canvas.setTool(tool);
-  document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
+}
+
+/** ツールが変わったとき（ボタン・キー・ペンのサイドボタンのどれでも） */
+function onToolChanged() {
+  const tool = canvas.tool;
+  document.querySelectorAll('[data-tool]').forEach((b) => {
+    const on = b.dataset.tool === tool;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-checked', String(on));
+  });
+  toolHintUntil = Date.now() + 4000;
   updateHint();
+  setTimeout(updateHint, 4100);
+}
+
+// ---------- 元に戻す / やり直す（図の変更と手書きを、操作した順にまとめて扱う） ----------
+const history = { undo: [], redo: [] };
+let suppressDocHistory = false;
+
+function pushHistory(entry) {
+  history.undo.push(entry);
+  if (history.undo.length > 300) history.undo.shift();
+  history.redo = [];
+  doc.redoStack = [];
+  updateUndo();
+}
+
+function resetHistory() {
+  history.undo = [];
+  history.redo = [];
+  updateUndo();
 }
 
 function updateUndo() {
-  $('undoBtn').disabled = !doc.undoStack.length && !canvas.ink.length;
-  $('redoBtn').disabled = !doc.redoStack.length;
+  $('undoBtn').disabled = !history.undo.length;
+  $('redoBtn').disabled = !history.redo.length;
 }
 
 function updateHint() {
   const coarse = window.matchMedia('(pointer: coarse)').matches;
   let hint = '';
-  if (canvas.ink.length) {
+  if (Date.now() < toolHintUntil) {
+    const info = TOOL_INFO[canvas.tool];
+    hint = `${info.name}: ${info.hint}`;
+  } else if (canvas.ink.length) {
     hint = '書き終わったら「整形 OCR」を押すと、図形・矢印・文字に変換されます';
   } else if (!doc.nodes().length) {
-    hint = canvas.tool === 'draw'
-      ? '四角・ひし形・丸を描き、中に文字、間に矢印を書いてみましょう'
-      : coarse
-        ? 'ダブルタップでノードを追加 ／ ペンで手書き ／ 2本指で移動・拡大'
-        : 'ダブルクリックでノードを追加 ／ ドラッグで移動 ／ Ctrl+ホイールで拡大';
+    hint =
+      canvas.tool === 'shape'
+        ? '四角・ひし形・丸を描き、図形どうしを線でつないでみましょう'
+        : canvas.tool === 'text'
+          ? '図形の中や線の近くに文字を書いてみましょう'
+          : coarse
+            ? 'ダブルタップでノードを追加 ／ 文字ペン・図形ペンで手書き ／ 2本指で移動・拡大'
+            : 'ダブルクリックでノードを追加 ／ ドラッグで移動 ／ Ctrl+ホイールで拡大';
   }
   $('hint').textContent = hint;
 }
@@ -813,7 +866,10 @@ function bindUI() {
     }
     if (mod || e.altKey) return;
     if (key === 'v') setTool('select');
-    else if (key === 'p') setTool('draw');
+    else if (key === 't') setTool('text');
+    else if (key === 'g') setTool('shape');
+    else if (key === 'e') setTool('eraser');
+    else if (key === 'p') setTool(canvas.tool === 'text' ? 'shape' : 'text');
     else if (key === 'f') canvas.fit();
     else if (key === '+' || key === '=') canvas.zoomBy(1.25);
     else if (key === '-') canvas.zoomBy(0.8);
@@ -832,7 +888,23 @@ function bindUI() {
     updateUndo();
     updateHint();
   });
-  canvas.addEventListener('tool', updateHint);
+  canvas.addEventListener('tool', onToolChanged);
+  canvas.addEventListener('ink-history', (e) => pushHistory({ ink: e.detail }));
+  canvas.addEventListener('pen-button', (e) => {
+    const d = e.detail;
+    if (d.unknown !== undefined) toast(`ペンのボタン（${d.unknown}）には何も割り当てていません`);
+    else toast(TOOL_INFO[d.tool].name + 'にしました');
+  });
+  doc.addEventListener('history', () => {
+    if (!suppressDocHistory) pushHistory({ doc: true });
+  });
+  $('penSwap').checked = localStorage.getItem('fc:penSwap') === '1';
+  canvas.swapPenButtons = $('penSwap').checked;
+  $('penSwap').addEventListener('change', (e) => {
+    canvas.swapPenButtons = e.target.checked;
+    localStorage.setItem('fc:penSwap', e.target.checked ? '1' : '0');
+    toast(e.target.checked ? '1つ目のボタン: 消しゴム ／ 2つ目のボタン: ペンの切り替え' : '1つ目のボタン: ペンの切り替え ／ 2つ目のボタン: 消しゴム');
+  });
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {
@@ -852,15 +924,31 @@ function bindUI() {
 
 const saveViewSoon = debounce(saveView, 400);
 
+function applyHistory(entry, dir) {
+  if (entry.doc) {
+    if (dir === 'undo') doc.undo();
+    else doc.redo();
+  }
+  if (entry.ink) canvas.applyInkRecord(entry.ink, dir);
+}
+
 function undo() {
   canvas.finishEdit();
-  if (!doc.undo()) canvas.undoInk();
+  const entry = history.undo.pop();
+  if (entry) {
+    applyHistory(entry, 'undo');
+    history.redo.push(entry);
+  }
   updateUndo();
 }
 
 function redo() {
   canvas.finishEdit();
-  doc.redo();
+  const entry = history.redo.pop();
+  if (entry) {
+    applyHistory(entry, 'redo');
+    history.undo.push(entry);
+  }
   updateUndo();
 }
 

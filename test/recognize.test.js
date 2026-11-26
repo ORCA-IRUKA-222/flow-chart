@@ -132,3 +132,28 @@ test('ノードの大きさを整え、中心線をそろえる', () => {
   ]);
   assert.equal(unified[0].w, unified[1].w);
 });
+
+test('ペンの種類: 文字ペンの線は図形や矢印にならず、図形ペンの線は文字にならない', () => {
+  const T = (points) => ({ points, k: 1, kind: 'text' });
+  const G = (points) => ({ points, k: 1, kind: 'shape' });
+  // 文字ペンで大きな「口」を書いても図形にはならない
+  let r = analyzeInk([T(rectStroke(0, 0, 80, 80))]);
+  assert.equal(r.shapes.length, 0);
+  assert.equal(r.texts.length, 1);
+  // 図形ペンの小さな線は文字にならず、手書きのまま残る
+  r = analyzeInk([G(lineStroke({ x: 0, y: 0 }, { x: 15, y: 3 }))]);
+  assert.equal(r.texts.length, 0);
+  assert.deepEqual(r.leftover, [0]);
+  // 図形の間でも、文字ペンの横線は矢印ではなく文字（線のラベルなど）
+  r = analyzeInk([
+    G(rectStroke(0, 0, 200, 80)),
+    G(rectStroke(300, 0, 200, 80)),
+    T(lineStroke({ x: 205, y: 40 }, { x: 295, y: 40 })),
+  ]);
+  assert.equal(r.shapes.length, 2);
+  assert.equal(r.connectors.length, 0);
+  assert.equal(r.texts.length, 1);
+  // 図形ペンなら、既存ノードの中に描いた小さめの四角も図形になる
+  r = analyzeInk([G(rectStroke(20, 20, 120, 60))], { nodes: [{ id: 'big', x: 0, y: 0, w: 600, h: 400 }] });
+  assert.equal(r.shapes.length, 1);
+});

@@ -21,6 +21,7 @@ const DOUBLE_TAP_MS = 380;
 const DRAG_THRESHOLD = 5;
 const HANDLE_OFFSET = 18;
 const SIDES = ['top', 'right', 'bottom', 'left'];
+const ERASER_RADIUS = 14; // 画面上のピクセル
 
 /** 形ごとの、文字を入れる範囲（ノードに対する割合）と余白 */
 export const INSETS = {
@@ -40,7 +41,10 @@ export class Canvas extends EventTarget {
     this.root = root;
     this.doc = doc;
     this.view = { x: 0, y: 0, k: 1 };
-    this.tool = 'select';
+    this.tool = 'select'; // select | text | shape | eraser
+    this.lastPen = 'text';
+    this.penButtons = 0;
+    this.swapPenButtons = false;
     this.selNodes = new Set();
     this.selEdges = new Set();
     this.editing = null; // { k: 'node'|'edge', id }
@@ -183,6 +187,8 @@ export class Canvas extends EventTarget {
   }
 
   setTool(tool) {
+    if (tool === 'text' || tool === 'shape') this.lastPen = tool;
+    if (tool !== 'eraser') this.hideEraser?.();
     this.tool = tool;
     this.root.dataset.tool = tool;
     this.emit('tool', tool);
@@ -444,7 +450,20 @@ export class Canvas extends EventTarget {
   onDown(e) {
     if (e.target.closest?.('.editing')) return; // 編集中の文字のカーソル操作
     if (this.editing) this.finishEdit();
-    if (e.pointerType === 'pen') this.penSeen = true;
+    if (e.pointerType === 'pen') {
+      this.penSeen = true;
+      // サイドボタンを押した瞬間（ペン先が浮いていても届く）
+      this.penButtons = e.buttons;
+      if (e.button === 1 || e.button === 2) {
+        e.preventDefault();
+        this.onPenButton(e.button === 2 ? 'barrel' : 'aux');
+        return;
+      }
+      if (e.button > 2 && e.button !== 5) {
+        this.emit('pen-button', { unknown: e.button });
+        return;
+      }
+    }
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
     try {
       this.root.setPointerCapture(e.pointerId);
@@ -467,12 +486,15 @@ export class Canvas extends EventTarget {
     const hit = this.hitTest(e);
     const base = { pid: e.pointerId, ptype: e.pointerType, sx: p.x, sy: p.y, wx: w.x, wy: w.y, hit, moved: false, shift: e.shiftKey || e.metaKey || e.ctrlKey };
 
-    const draws =
-      this.tool === 'draw'
-        ? e.pointerType !== 'touch' || !this.penSeen
-        : e.pointerType === 'pen' && hit.type === 'empty';
-    if (draws && e.button === 0 && hit.type !== 'handle' && hit.type !== 'resize') {
-      this.startInk(e, w);
+    // ペン先が付いたときの動き（ペンを使ったことがあれば、指は画面の移動・拡大に使う）
+    const fingerFree = e.pointerType === 'touch' && this.penSeen;
+    const eraserTip = e.pointerType === 'pen' && (e.button === 5 || (e.buttons & 32) !== 0);
+    if ((this.tool === 'eraser' && !fingerFree) || eraserTip) {
+      this.startErase(e, w);
+      return;
+    }
+    if ((this.tool === 'text' || this.tool === 'shape') && !fingerFree && e.button === 0) {
+      this.startInk(e, w, this.tool);
       return;
     }
     if (e.button === 1 || e.button === 2) {
@@ -514,7 +536,8 @@ export class Canvas extends EventTarget {
         this.requestRender();
         break;
       default:
-        if (base.shift && e.pointerType === 'mouse') {
+        // マウスは Shift + ドラッグ、ペンはそのままドラッグで範囲選択
+        if ((base.shift && e.pointerType === 'mouse') || (e.pointerType === 'pen' && this.tool === 'select')) {
           this.action = { ...base, type: 'box', cur: w };
         } else {
           this.action = { ...base, type: 'pan', view: { ...this.view } };
@@ -529,8 +552,19 @@ export class Canvas extends EventTarget {
       ptr.y = e.clientY;
     }
     const a = this.action;
+    if (e.pointerType === 'pen') {
+      // ペンを浮かせたままサイドボタンを押したとき、pointermove だけが届く環境もある
+      const pressed = e.buttons & ~this.penButtons;
+      this.penButtons = e.buttons;
+      if (!a && pressed & 2) this.onPenButton('barrel');
+      else if (!a && pressed & 4) this.onPenButton('aux');
+      if (this.tool === 'eraser' || e.buttons & 32) this.showEraserAt(this.screenPoint(e));
+    }
     if (!a) {
-      if (e.pointerType === 'mouse') this.updateHover(e);
+      if (e.pointerType === 'mouse') {
+        this.updateHover(e);
+        if (this.tool === 'eraser') this.showEraserAt(this.screenPoint(e));
+      }
       return;
     }
     if (a.type === 'pinch') {
@@ -540,7 +574,7 @@ export class Canvas extends EventTarget {
     if (!ptr || a.pid !== e.pointerId) return;
     const p = this.screenPoint(e);
     const w = this.toWorld(p);
-    if (!a.moved && Math.hypot(p.x - a.sx, p.y - a.sy) < DRAG_THRESHOLD && a.type !== 'ink') return;
+    if (!a.moved && Math.hypot(p.x - a.sx, p.y - a.sy) < DRAG_THRESHOLD && a.type !== 'ink' && a.type !== 'erase') return;
     a.moved = true;
 
     switch (a.type) {
@@ -552,6 +586,12 @@ export class Canvas extends EventTarget {
           if (dist(last, q) * this.view.k >= 1) a.stroke.points.push({ x: q.x, y: q.y, t: performance.now() - a.t0 });
         }
         this.updateLiveStroke(a.stroke);
+        break;
+      }
+      case 'erase': {
+        const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+        for (const ev of events.length ? events : [e]) this.eraseAt(this.toWorld(this.screenPoint(ev)), a);
+        this.showEraserAt(p);
         break;
       }
       case 'pan':
@@ -627,6 +667,7 @@ export class Canvas extends EventTarget {
 
   onUp(e, cancelled = false) {
     this.pointers.delete(e.pointerId);
+    if (e.pointerType === 'pen') this.penButtons = e.buttons;
     try {
       this.root.releasePointerCapture(e.pointerId);
     } catch {
@@ -659,6 +700,11 @@ export class Canvas extends EventTarget {
         this.liveStroke = null;
         this.inkDirty = true;
         this.emit('ink', this.ink.length);
+        this.emit('ink-history', { type: 'add', stroke: a.stroke });
+        break;
+      case 'erase':
+        this.hideEraser();
+        if (a.removed.length) this.emit('ink-history', { type: 'erase', items: a.removed });
         break;
       case 'move':
         if (a.moved) {
@@ -749,6 +795,10 @@ export class Canvas extends EventTarget {
       this.liveStroke?.remove();
       this.liveStroke = null;
     }
+    if (a.type === 'erase') {
+      this.hideEraser();
+      if (a.removed.length) this.emit('ink-history', { type: 'erase', items: a.removed });
+    }
     if (a.type === 'move' && a.moved) {
       const tx = this.doc.tx();
       for (const [id, o] of a.origins) tx.put('node', { id, x: o.x, y: o.y });
@@ -812,16 +862,75 @@ export class Canvas extends EventTarget {
   }
 
   // ---------- 手書き ----------
-  startInk(e, w) {
-    const stroke = { points: [{ x: w.x, y: w.y, t: 0 }], k: this.view.k, width: 2.4 / this.view.k };
+  /** ペンのサイドボタン: barrel（1つ目）でペンの種類を切り替え、aux（2つ目）で消しゴムの切り替え */
+  onPenButton(which) {
+    const role = (which === 'barrel') !== this.swapPenButtons ? 'switch' : 'eraser';
+    if (role === 'switch') {
+      const next = this.tool === 'text' ? 'shape' : this.tool === 'shape' ? 'text' : this.lastPen;
+      this.setTool(next);
+    } else {
+      this.setTool(this.tool === 'eraser' ? this.lastPen : 'eraser');
+    }
+    this.emit('pen-button', { role, tool: this.tool });
+  }
+
+  startInk(e, w, kind) {
+    const stroke = { points: [{ x: w.x, y: w.y, t: 0 }], k: this.view.k, width: (kind === 'text' ? 2.2 : 2.6) / this.view.k, kind };
     this.action = { type: 'ink', pid: e.pointerId, ptype: e.pointerType, stroke, t0: performance.now(), sx: 0, sy: 0, moved: true };
-    this.liveStroke = svg('path', { class: 'ink', 'stroke-width': stroke.width });
+    this.liveStroke = svg('path', { class: `ink ink-${kind}`, 'stroke-width': stroke.width });
     this.inkG.append(this.liveStroke);
     this.updateLiveStroke(stroke);
   }
 
   updateLiveStroke(stroke) {
     this.liveStroke?.setAttribute('d', inkPath(stroke.points));
+  }
+
+  startErase(e, w) {
+    this.action = { type: 'erase', pid: e.pointerId, ptype: e.pointerType, sx: 0, sy: 0, moved: true, removed: [] };
+    this.eraseAt(w, this.action);
+    this.showEraserAt(this.screenPoint(e));
+  }
+
+  /** 消しゴムが触れた手書きの線を、線ごと消す */
+  eraseAt(w, a) {
+    const r = ERASER_RADIUS / this.view.k;
+    let changed = false;
+    for (let i = this.ink.length - 1; i >= 0; i--) {
+      const s = this.ink[i];
+      if (!s.box) s.box = boxOfPoints(s.points);
+      const b = s.box;
+      if (w.x < b.x - r || w.x > b.x + b.w + r || w.y < b.y - r || w.y > b.y + b.h + r) continue;
+      let hit = false;
+      for (let j = 0; j < s.points.length && !hit; j++) {
+        const q = s.points[j];
+        const prev = s.points[j - 1] || q;
+        if (distToSeg(w, prev, q) <= r + (s.width || 0) / 2) hit = true;
+      }
+      if (hit) {
+        a.removed.push({ stroke: s, index: i });
+        this.ink.splice(i, 1);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.inkDirty = true;
+      this.requestRender();
+      this.emit('ink', this.ink.length);
+    }
+  }
+
+  showEraserAt(p) {
+    if (!this.eraserEl) {
+      this.eraserEl = el('div', { class: 'eraser-cursor' });
+      this.root.append(this.eraserEl);
+    }
+    this.eraserEl.style.transform = `translate(${p.x}px, ${p.y}px)`;
+    this.eraserEl.style.display = 'block';
+  }
+
+  hideEraser() {
+    if (this.eraserEl) this.eraserEl.style.display = 'none';
   }
 
   setInk(strokes) {
@@ -832,14 +941,30 @@ export class Canvas extends EventTarget {
   }
 
   clearInk() {
+    if (!this.ink.length) return;
+    const before = this.ink;
     this.setInk([]);
+    this.emit('ink-history', { type: 'replace', before, after: [] });
   }
 
-  undoInk() {
-    if (!this.ink.length) return false;
-    this.ink.pop();
+  /** 手書きの操作を元に戻す / やり直す */
+  applyInkRecord(rec, dir) {
+    const undo = dir === 'undo';
+    if (rec.type === 'add') {
+      if (undo) this.ink = this.ink.filter((s) => s !== rec.stroke);
+      else this.ink.push(rec.stroke);
+    } else if (rec.type === 'erase') {
+      if (undo) {
+        const items = [...rec.items].sort((x, y) => x.index - y.index);
+        for (const it of items) this.ink.splice(Math.min(it.index, this.ink.length), 0, it.stroke);
+      } else {
+        const gone = new Set(rec.items.map((it) => it.stroke));
+        this.ink = this.ink.filter((s) => !gone.has(s));
+      }
+    } else if (rec.type === 'replace') {
+      this.ink = [...(undo ? rec.before : rec.after)];
+    }
     this.setInk(this.ink);
-    return true;
   }
 
   // ---------- 描画 ----------
@@ -1007,7 +1132,7 @@ export class Canvas extends EventTarget {
     this.inkDirty = false;
     for (const child of [...this.inkG.children]) if (child !== this.liveStroke) child.remove();
     for (const s of this.ink) {
-      this.inkG.insertBefore(svg('path', { class: 'ink', d: inkPath(s.points), 'stroke-width': s.width }), this.liveStroke || null);
+      this.inkG.insertBefore(svg('path', { class: `ink ink-${s.kind || 'any'}`, d: inkPath(s.points), 'stroke-width': s.width }), this.liveStroke || null);
     }
   }
 
@@ -1208,6 +1333,14 @@ function inkPath(pts) {
   }
   const last = pts[pts.length - 1];
   return `${d} L${last.x.toFixed(1)} ${last.y.toFixed(1)}`;
+}
+
+function distToSeg(p, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2)) : 0;
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
 }
 
 function normRect(x1, y1, x2, y2) {

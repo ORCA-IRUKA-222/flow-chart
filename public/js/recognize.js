@@ -126,17 +126,22 @@ function sameTarget(a, b) {
 export function analyzeInk(strokes, { nodes = [], edges = [] } = {}) {
   const ks = strokes.map((s) => s.k || 1).sort((a, b) => a - b);
   const S = 1 / (ks[Math.floor(ks.length / 2)] || 1);
-  const infos = strokes.map((s, i) => (s.points.length > 0 ? strokeInfo(s.points, i) : null)).filter(Boolean);
+  const infos = strokes
+    .map((s, i) => (s.points.length > 0 ? { ...strokeInfo(s.points, i), kind: s.kind || null } : null))
+    .filter(Boolean);
+  // 文字ペンの線は文字だけ、図形ペンの線は図形・矢印だけとして扱う（ペンの種類がなければ形から推測）
+  const maybeShape = (si) => si.kind !== 'text';
+  const maybeText = (si) => si.kind !== 'shape';
   const used = new Set();
 
   // 1) 図形: 1本で閉じた線 + 複数の線で閉じた形
   let candidates = [];
   for (const si of infos) {
-    if (isClosed(si, S) && si.minDim >= 24 * S && si.maxDim >= 40 * S) {
+    if (maybeShape(si) && isClosed(si, S) && si.minDim >= 24 * S && si.maxDim >= 40 * S) {
       candidates.push({ idx: [si.i], points: si.points, bbox: si.bbox });
     }
   }
-  const openInfos = infos.filter((si) => !candidates.some((c) => c.idx.includes(si.i)));
+  const openInfos = infos.filter((si) => maybeShape(si) && !candidates.some((c) => c.idx.includes(si.i)));
   candidates.push(...findMultiStrokeShapes(openInfos, S));
 
   // 大きい順に並べ、他の図形や既存ノードの中にあるもの（"口" などの文字）は除く
@@ -144,8 +149,10 @@ export function analyzeInk(strokes, { nodes = [], edges = [] } = {}) {
   const shapes = [];
   for (const c of candidates) {
     const cc = { x: c.bbox.x + c.bbox.w / 2, y: c.bbox.y + c.bbox.h / 2 };
-    if (shapes.some((s) => containsPoint(s.bbox, cc))) continue;
-    if (nodes.some((n) => containsPoint(n, cc))) continue;
+    // 図形ペンで描いたとはっきりしていれば、他の図形の中でも図形として扱う
+    const surelyShape = c.idx.every((i) => infos.find((x) => x.i === i)?.kind === 'shape');
+    if (!surelyShape && shapes.some((s) => containsPoint(s.bbox, cc))) continue;
+    if (!surelyShape && nodes.some((n) => containsPoint(n, cc))) continue;
     shapes.push({ ...c, shape: classifyShape(c.points) });
     c.idx.forEach((i) => used.add(i));
   }
@@ -177,7 +184,7 @@ export function analyzeInk(strokes, { nodes = [], edges = [] } = {}) {
   // 2) 矢印（線）: 両端がそれぞれ別の図形・ノードの近くにある線
   const connectors = [];
   for (const si of infos) {
-    if (used.has(si.i) || si.len < 40 * S) continue;
+    if (used.has(si.i) || !maybeShape(si) || si.len < 40 * S) continue;
     const inside = innermostTarget(si.center);
     if (inside && containsPoint(inside.box, si.start) && containsPoint(inside.box, si.end)) continue;
     const a = nearestTarget(si.start, 30 * S);
@@ -189,7 +196,7 @@ export function analyzeInk(strokes, { nodes = [], edges = [] } = {}) {
 
   // 3) 矢じり: 線の端の近くにある小さな線
   for (const si of infos) {
-    if (used.has(si.i) || si.maxDim > 45 * S) continue;
+    if (used.has(si.i) || !maybeShape(si) || si.maxDim > 45 * S) continue;
     if (innermostTarget(si.center)) continue;
     for (const c of connectors) {
       const s = c.points[0];
@@ -213,14 +220,14 @@ export function analyzeInk(strokes, { nodes = [], edges = [] } = {}) {
   const inTarget = new Map();
   const free = [];
   for (const si of infos) {
-    if (used.has(si.i)) continue;
+    if (used.has(si.i) || !maybeText(si)) continue;
     const t = innermostTarget(si.center, 2 * S);
     if (t) {
       const key = t.ref.type === 'node' ? `n:${t.ref.id}` : `s:${t.ref.index}`;
       if (!inTarget.has(key)) inTarget.set(key, { target: t.ref, strokes: [] });
       inTarget.get(key).strokes.push(si);
       used.add(si.i);
-    } else if (si.maxDim <= 120 * S) {
+    } else if (si.maxDim <= (si.kind === 'text' ? 400 : 120) * S) {
       free.push(si);
     }
   }
