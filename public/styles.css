@@ -1187,3 +1187,29 @@ dialog {
     display: none;
   }
 }
+
+.pen-test-area {
+  height: 160px;
+  border: 2px dashed var(--border);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pen-test-log {
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 10px 0 0;
+  min-height: 7.5em;
+  max-height: 12em;
+  overflow: auto;
+  white-space: pre-wrap;
+}

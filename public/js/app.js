@@ -846,7 +846,7 @@ function bindUI() {
 
   window.addEventListener('keydown', (e) => {
     const t = e.target;
-    if (t instanceof HTMLInputElement || t?.isContentEditable || $('dialog').open) return;
+    if (t instanceof HTMLInputElement || t?.isContentEditable || document.querySelector('dialog[open]')) return;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
     if (mod && key === 'z') {
@@ -898,6 +898,7 @@ function bindUI() {
   doc.addEventListener('history', () => {
     if (!suppressDocHistory) pushHistory({ doc: true });
   });
+  bindPenTest();
   $('penSwap').checked = localStorage.getItem('fc:penSwap') === '1';
   canvas.swapPenButtons = $('penSwap').checked;
   $('penSwap').addEventListener('change', (e) => {
@@ -923,6 +924,47 @@ function bindUI() {
 }
 
 const saveViewSoon = debounce(saveView, 400);
+
+/** ペンのボタン確認: ブラウザに届いた pointer イベントの中身を表示する */
+function bindPenTest() {
+  const area = $('penTestArea');
+  const log = $('penTestLog');
+  const lines = [];
+  const BUTTON_NAMES = { 0: 'ペン先/なし', 1: '2つ目（中）', 2: '1つ目（右）', 5: '消しゴム' };
+  const describe = (e) => {
+    const bits = [];
+    if (e.buttons & 1) bits.push('ペン先');
+    if (e.buttons & 2) bits.push('1つ目');
+    if (e.buttons & 4) bits.push('2つ目');
+    if (e.buttons & 32) bits.push('消しゴム');
+    return `${e.type.replace('pointer', '')} 種類=${e.pointerType} button=${e.button}${BUTTON_NAMES[e.button] ? `(${BUTTON_NAMES[e.button]})` : ''} buttons=${e.buttons}[${bits.join('+') || 'なし'}] 筆圧=${e.pressure.toFixed(2)}`;
+  };
+  let lastButtons = -1;
+  const onEvent = (e) => {
+    e.preventDefault();
+    // 動いているだけのイベントは、ボタンの状態が変わったときだけ記録する
+    if (e.type === 'pointermove' && e.buttons === lastButtons) return;
+    lastButtons = e.buttons;
+    lines.unshift(describe(e));
+    lines.length = Math.min(lines.length, 12);
+    log.textContent = lines.join('\n');
+    if (e.pointerType === 'pen' && (e.buttons & 2 || e.button === 2)) area.textContent = '1つ目のボタン: 届いています';
+    else if (e.pointerType === 'pen' && (e.buttons & 4 || e.button === 1)) area.textContent = '2つ目のボタン: 届いています';
+    else if (e.pointerType === 'pen' && (e.buttons & 32 || e.button === 5)) area.textContent = '消しゴム: 届いています';
+  };
+  for (const t of ['pointerdown', 'pointermove', 'pointerup']) area.addEventListener(t, onEvent);
+  area.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    lines.unshift('contextmenu（長押し・右クリック相当）');
+    log.textContent = lines.join('\n');
+  });
+  $('penTestBtn').addEventListener('click', () => {
+    lines.length = 0;
+    log.textContent = '';
+    area.textContent = 'ここでペンを使う';
+    $('penTestDialog').showModal();
+  });
+}
 
 function applyHistory(entry, dir) {
   if (entry.doc) {
