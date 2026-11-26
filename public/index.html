@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#2f5bd3" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="フローチャート" />
+    <title>フローチャート</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar" aria-label="ボード一覧">
+        <div class="side-head">
+          <span class="side-title">ボード</span>
+          <button id="newBoard" class="btn small primary" title="新しいボードを作る">＋ 新規</button>
+        </div>
+        <ul id="boardList" class="board-list"></ul>
+        <div class="side-foot">
+          <button id="exportBtn" class="btn small" title="このボードを JSON ファイルに保存">書き出し</button>
+          <label class="btn small" title="JSON ファイルから新しいボードを作る">
+            読み込み<input type="file" id="importInput" accept=".json,application/json" hidden />
+          </label>
+        </div>
+      </aside>
+      <div id="scrim" hidden></div>
+
+      <main id="main">
+        <header id="topbar">
+          <button id="menuBtn" class="icon-btn" aria-label="ボード一覧を開く" title="ボード一覧">
+            <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+          </button>
+          <input id="boardName" class="board-name" aria-label="ボード名" spellcheck="false" />
+
+          <div class="toolbar" role="toolbar" aria-label="ツール">
+            <div class="seg">
+              <button data-tool="select" class="tool" title="選択・移動（V）">
+                <svg viewBox="0 0 24 24"><path d="M5 3l13 8-6 1.5L9 19z" /></svg><span>選択</span>
+              </button>
+              <button data-tool="draw" class="tool" title="ペンで手書き（P）">
+                <svg viewBox="0 0 24 24"><path d="M4 20l4-1 11-11-3-3L5 16zM14 6l3 3" /></svg><span>ペン</span>
+              </button>
+            </div>
+            <button id="ocrBtn" class="btn primary" title="手書きの図形・矢印・文字を清書する">
+              <svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8zM18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9z" /></svg>
+              <span>整形 OCR</span><span id="inkCount" class="badge" hidden>0</span>
+            </button>
+            <button id="clearInk" class="icon-btn" title="手書きを消す" aria-label="手書きを消す">
+              <svg viewBox="0 0 24 24"><path d="M7 21h10M5 15l7-11 7 7-7 9H8z" /></svg>
+            </button>
+            <span class="divider"></span>
+            <button id="addNode" class="icon-btn" title="ノードを追加（キャンバスをダブルタップでも追加）" aria-label="ノードを追加">
+              <svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="2" /><path d="M12 9v6M9 12h6" /></svg>
+            </button>
+            <button id="undoBtn" class="icon-btn" title="元に戻す（Ctrl+Z）" aria-label="元に戻す">
+              <svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5M4 9h10a6 6 0 010 12h-3" /></svg>
+            </button>
+            <button id="redoBtn" class="icon-btn" title="やり直す（Ctrl+Shift+Z）" aria-label="やり直す">
+              <svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5M20 9H10a6 6 0 000 12h3" /></svg>
+            </button>
+            <span class="divider"></span>
+            <button id="zoomOut" class="icon-btn" title="縮小" aria-label="縮小">
+              <svg viewBox="0 0 24 24"><path d="M6 12h12" /></svg>
+            </button>
+            <button id="zoomLabel" class="zoom-label" title="100% に戻す">100%</button>
+            <button id="zoomIn" class="icon-btn" title="拡大" aria-label="拡大">
+              <svg viewBox="0 0 24 24"><path d="M6 12h12M12 6v12" /></svg>
+            </button>
+            <button id="fitBtn" class="icon-btn" title="全体を表示（F）" aria-label="全体を表示">
+              <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
+            </button>
+          </div>
+          <span id="status" class="status" data-state="connecting" title="同期の状態"><i></i><span>接続中</span></span>
+        </header>
+
+        <div id="viewport" tabindex="0" aria-label="キャンバス"></div>
+
+        <div id="selbar" class="selbar" hidden></div>
+        <div id="hint" class="hint"></div>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <dialog id="dialog">
+      <form method="dialog">
+        <p id="dialogTitle" class="dialog-title"></p>
+        <input id="dialogInput" autocomplete="off" />
+        <div class="dialog-actions">
+          <button value="cancel" class="btn" formnovalidate>キャンセル</button>
+          <button value="ok" class="btn primary" id="dialogOk">OK</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>

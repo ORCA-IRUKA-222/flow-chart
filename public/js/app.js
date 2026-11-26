@@ -1,0 +1,746 @@
+// アプリ全体のつなぎ込み: ボード一覧・同期・ツールバー・手書き整形
+import { COLORS, emptyBoard, isValidId } from '/shared/ops.js';
+import { Canvas } from './canvas.js';
+import { Doc } from './doc.js';
+import { recognizeLines } from './handwriting.js';
+import { idbDel, idbGet, idbSet } from './idb.js';
+import { alignNodes, analyzeInk, splitLines, tidyBox, unifySizes } from './recognize.js';
+import { Sync } from './sync.js';
+import { rectsIntersect, snap } from './geometry.js';
+import { debounce, el, hideToast, toast, uid } from './util.js';
+
+const $ = (id) => document.getElementById(id);
+
+const clientId = (() => {
+  let id = localStorage.getItem('fc:client');
+  if (!id) {
+    id = uid(10);
+    localStorage.setItem('fc:client', id);
+  }
+  return id;
+})();
+
+const state = {
+  boards: [], // [{ id, name, updatedAt, nodeCount }]
+  currentId: null,
+  inkByBoard: new Map(),
+  token: localStorage.getItem('fc:token') || '',
+};
+
+const doc = new Doc(clientId);
+const canvas = new Canvas($('viewport'), doc);
+let sync;
+
+// ---------- ダイアログ ----------
+function ask(title, value = '', { type = 'text', okLabel = 'OK' } = {}) {
+  const dlg = $('dialog');
+  $('dialogTitle').textContent = title;
+  const input = $('dialogInput');
+  input.type = type;
+  input.value = value;
+  $('dialogOk').textContent = okLabel;
+  dlg.returnValue = '';
+  return new Promise((resolve) => {
+    dlg.addEventListener('close', () => resolve(dlg.returnValue === 'ok' ? input.value.trim() : null), { once: true });
+    dlg.showModal();
+    input.select();
+  });
+}
+
+// ---------- 認証（FLOW_TOKEN が設定されているサーバーのみ） ----------
+async function ensureAuth() {
+  let cfg = { auth: false };
+  try {
+    cfg = await (await fetch('/api/config')).json();
+  } catch {
+    return; // オフライン
+  }
+  if (!cfg.auth) return;
+  for (;;) {
+    try {
+      const res = await fetch('/api/boards', { headers: { 'x-flow-token': state.token } });
+      if (res.status !== 401) return;
+    } catch {
+      return;
+    }
+    const t = await ask('合言葉を入力してください（サーバーの FLOW_TOKEN）', '', { type: 'password' });
+    if (t === null) return;
+    state.token = t;
+    localStorage.setItem('fc:token', t);
+  }
+}
+
+// ---------- ボード一覧 ----------
+function boardName(id) {
+  return state.boards.find((b) => b.id === id)?.name || doc.board.name || '無題のボード';
+}
+
+function renderBoardList() {
+  const list = $('boardList');
+  list.replaceChildren(
+    ...state.boards.map((b) => {
+      const li = el(
+        'li',
+        { class: b.id === state.currentId ? 'active' : '', title: b.name },
+        el('span', { class: 'b-name' }, b.name, el('br'), el('span', { class: 'b-meta' }, boardMeta(b))),
+        el(
+          'span',
+          { class: 'b-actions' },
+          el('button', { class: 'icon-btn mini', title: '名前を変更', 'aria-label': '名前を変更', 'data-act': 'rename' }, icon('M4 20h4L19 9l-4-4L4 16zM13 7l4 4')),
+          el('button', { class: 'icon-btn mini', title: '削除', 'aria-label': '削除', 'data-act': 'delete' }, icon('M5 7h14M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3')),
+        ),
+      );
+      li.addEventListener('click', (e) => {
+        const act = e.target.closest('[data-act]')?.dataset.act;
+        if (act === 'rename') renameBoard(b.id);
+        else if (act === 'delete') deleteBoard(b.id);
+        else {
+          openBoard(b.id);
+          if (window.matchMedia('(max-width: 900px)').matches) toggleSidebar(false);
+        }
+      });
+      return li;
+    }),
+  );
+}
+
+function boardMeta(b) {
+  const parts = [];
+  if (typeof b.nodeCount === 'number') parts.push(`${b.nodeCount} ノード`);
+  if (b.updatedAt) parts.push(new Date(b.updatedAt).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
+  if (b.local) parts.push('未同期');
+  return parts.join(' · ');
+}
+
+function icon(d) {
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.setAttribute('viewBox', '0 0 24 24');
+  const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  p.setAttribute('d', d);
+  s.append(p);
+  return s;
+}
+
+function setBoards(list) {
+  const local = Object.entries(sync?.localCreated || {})
+    .filter(([id]) => !list.some((b) => b.id === id))
+    .map(([id, name]) => ({ id, name, local: true, updatedAt: Date.now() }));
+  state.boards = [...local, ...list];
+  idbSet('boards', state.boards);
+  renderBoardList();
+  if (state.currentId) $('boardName').value = boardName(state.currentId);
+}
+
+async function createBoard(name, { open = true } = {}) {
+  const id = uid(12);
+  const n = name || `ボード ${state.boards.length + 1}`;
+  sync.ensure(id, n);
+  state.boards.unshift({ id, name: n, local: true, updatedAt: Date.now(), nodeCount: 0 });
+  renderBoardList();
+  await idbSet(`board:${id}`, emptyBoard(id, n));
+  if (open) await openBoard(id);
+  return id;
+}
+
+async function renameBoard(id) {
+  const name = await ask('ボード名', boardName(id), { okLabel: '変更' });
+  if (name) applyRename(id, name);
+}
+
+function applyRename(id, name) {
+  if (!sync.rename(id, name) && !sync.localCreated[id]) {
+    toast('オフラインのため名前を変更できません', { kind: 'error' });
+    $('boardName').value = boardName(id);
+    return;
+  }
+  const b = state.boards.find((x) => x.id === id);
+  if (b) b.name = name;
+  if (id === state.currentId) {
+    doc.board.name = name;
+    $('boardName').value = name;
+    saveCache();
+  }
+  renderBoardList();
+}
+
+async function deleteBoard(id) {
+  const name = boardName(id);
+  if (!confirm(`「${name}」を削除しますか？\n他の端末からも消え、元に戻せません。`)) return;
+  if (sync.localCreated[id] && !sync.online) {
+    delete sync.localCreated[id];
+    sync.persist();
+    onBoardDeleted(id);
+    return;
+  }
+  if (!sync.remove(id)) toast('オフラインのため削除できません', { kind: 'error' });
+}
+
+async function onBoardDeleted(id) {
+  state.boards = state.boards.filter((b) => b.id !== id);
+  idbSet('boards', state.boards);
+  idbDel(`board:${id}`);
+  state.inkByBoard.delete(id);
+  renderBoardList();
+  if (id === state.currentId) {
+    toast('このボードは削除されました');
+    state.currentId = null;
+    if (state.boards.length) await openBoard(state.boards[0].id);
+    else await createBoard('はじめてのボード');
+  }
+}
+
+// ---------- ボードを開く ----------
+const saveCache = debounce(() => {
+  if (state.currentId && doc.id === state.currentId) idbSet(`board:${doc.id}`, doc.board);
+}, 500);
+
+function saveView() {
+  if (state.currentId) localStorage.setItem(`fc:view:${state.currentId}`, JSON.stringify(canvas.view));
+}
+
+async function openBoard(id) {
+  if (!isValidId(id)) return;
+  canvas.finishEdit();
+  if (state.currentId) {
+    saveView();
+    state.inkByBoard.set(state.currentId, canvas.ink);
+    saveCache.flush();
+  }
+  state.currentId = id;
+  localStorage.setItem('fc:lastBoard', id);
+  const name = state.boards.find((b) => b.id === id)?.name || '無題のボード';
+  const cached = (await idbGet(`board:${id}`)) || emptyBoard(id, name);
+  if (state.currentId !== id) return;
+  doc.load(cached);
+  doc.applyRemote(sync.pendingOps(id));
+  canvas.setInk(state.inkByBoard.get(id) || []);
+  $('boardName').value = name;
+  renderBoardList();
+  const v = localStorage.getItem(`fc:view:${id}`);
+  if (v) {
+    try {
+      canvas.setView(JSON.parse(v));
+    } catch {
+      canvas.fit();
+    }
+  } else {
+    canvas.fit();
+  }
+  canvas.render();
+  sync.join(id, name);
+  updateUndo();
+  updateHint();
+}
+
+// ---------- 同期の状態表示 ----------
+function updateStatus() {
+  const s = $('status');
+  const pending = sync.pendingCount();
+  let label;
+  let st = sync.status;
+  if (st === 'online') label = pending ? `送信中 ${pending}` : '同期済み';
+  else if (st === 'connecting') label = '接続中…';
+  else label = pending ? `オフライン（未送信 ${pending}）` : 'オフライン';
+  s.dataset.state = st;
+  s.querySelector('span').textContent = label;
+  s.title = st === 'online' ? 'サーバーと同期しています' : '接続が戻ると自動で同期します';
+}
+
+// ---------- 手書き整形（OCR） ----------
+let ocrRunning = false;
+
+async function runOCR() {
+  if (ocrRunning) return;
+  canvas.finishEdit();
+  const strokes = canvas.ink;
+  if (!strokes.length) {
+    toast('ペンで図形・矢印・文字を書いてから押してください');
+    return;
+  }
+  ocrRunning = true;
+  $('ocrBtn').disabled = true;
+  try {
+    const boardId = doc.id;
+    const existing = doc.nodes();
+    const result = analyzeInk(strokes, { nodes: existing, edges: canvas.edgeLines() });
+
+    // 文字の認識
+    const lines = [];
+    const spans = result.texts.map((t) => {
+      const ls = splitLines(t.strokes);
+      const start = lines.length;
+      lines.push(...ls);
+      return [start, ls.length];
+    });
+    const ks = strokes.map((s) => s.k || 1).sort((a, b) => a - b);
+    let recog = { results: [], ok: true };
+    if (lines.length) {
+      toast('文字を認識しています…', { duration: 0 });
+      recog = await recognizeLines(lines, { k: ks[Math.floor(ks.length / 2)], token: state.token });
+      hideToast();
+    }
+    if (doc.id !== boardId) return;
+    const textOf = result.texts.map((_, i) => {
+      const [start, count] = spans[i];
+      return recog.results
+        .slice(start, start + count)
+        .filter(Boolean)
+        .join('\n')
+        .trim();
+    });
+
+    const keepStrokes = new Set(result.leftover);
+    const failed = [];
+    result.texts.forEach((t, i) => {
+      if (!textOf[i]) {
+        failed.push(i);
+        t.idx.forEach((s) => keepStrokes.add(s));
+      }
+    });
+
+    const tx = doc.tx();
+    let z = doc.maxZ();
+
+    // 図形 → ノード
+    let shapeNodes = result.shapes.map((s) => ({ id: uid(), shape: s.shape, color: 'default', text: '', ...tidyBox(s.shape, s.bbox) }));
+    result.texts.forEach((t, i) => {
+      if (t.target.type === 'shape' && textOf[i]) shapeNodes[t.target.index].text = textOf[i];
+    });
+    shapeNodes = unifySizes(shapeNodes);
+    shapeNodes = shapeNodes.map((n) => ({ ...n, ...canvas.fitSize(n, n.text) }));
+    const vis = canvas.visibleWorld(0);
+    shapeNodes = alignNodes(
+      shapeNodes,
+      existing.filter((n) => rectsIntersect(n, vis)),
+    ).map((n) => ({ ...n, x: snap(n.x, 5), y: snap(n.y, 5), z: ++z }));
+    shapeNodes.forEach((n) => tx.put('node', n));
+
+    // 既存ノードの中に書いた文字 → 文字を追加
+    result.texts.forEach((t, i) => {
+      if (t.target.type !== 'node' || !textOf[i]) return;
+      const n = doc.node(t.target.id);
+      const text = n.text ? `${n.text}\n${textOf[i]}` : textOf[i];
+      tx.put('node', { id: n.id, text, ...canvas.fitSize(n, text) });
+    });
+
+    // 矢印 → 線
+    const idOf = (ref) => (ref.type === 'node' ? ref.id : shapeNodes[ref.index].id);
+    const labelFor = (type, key) =>
+      result.texts
+        .map((t, i) => (t.target.type === type && (t.target.index ?? t.target.id) === key ? textOf[i] : ''))
+        .filter(Boolean)
+        .join(' ');
+    let edgeCount = 0;
+    result.connectors.forEach((c, index) => {
+      const from = idOf(c.from);
+      const to = idOf(c.to);
+      const label = labelFor('connector', index);
+      const exists = doc.edges().find((e) => e.from === from && e.to === to);
+      if (exists) {
+        if (label) tx.put('edge', { id: exists.id, label });
+        return;
+      }
+      tx.put('edge', { id: uid(), from, to, label, style: 'orthogonal', arrow: true });
+      edgeCount++;
+    });
+
+    // 既存の線の近くに書いた文字 → ラベル
+    result.texts.forEach((t, i) => {
+      if (t.target.type === 'edge' && textOf[i]) tx.put('edge', { id: t.target.id, label: textOf[i] });
+    });
+
+    // どこにも属さない文字 → テキストノード
+    let textCount = 0;
+    result.texts.forEach((t, i) => {
+      if (t.target.type !== 'free' || !textOf[i]) return;
+      const base = { id: uid(), shape: 'text', color: 'default', text: textOf[i], ...tidyBox('text', t.bbox) };
+      tx.put('node', { ...base, ...canvas.fitSize(base, base.text), z: ++z });
+      textCount++;
+    });
+
+    if (tx.size) tx.commit();
+    canvas.setInk(strokes.filter((_, i) => keepStrokes.has(i)));
+    if (shapeNodes.length) canvas.select(shapeNodes.map((n) => n.id));
+
+    const recognizedTexts = result.texts.length - failed.length;
+    if (!tx.size && !recognizedTexts) {
+      toast(lines.length && !recog.ok ? '文字認識サービスに接続できませんでした' : '図形として認識できませんでした。もう少し大きく、線を閉じて書いてみてください', { kind: 'error', duration: 4000 });
+    } else if (lines.length && !recog.ok) {
+      toast('図形と線を整えました。文字認識サービスに接続できないため、文字は手書きのまま残しています', { kind: 'error', duration: 5000 });
+    } else {
+      const parts = [];
+      if (shapeNodes.length) parts.push(`図形 ${shapeNodes.length}`);
+      if (edgeCount) parts.push(`線 ${edgeCount}`);
+      if (recognizedTexts) parts.push(`文字 ${recognizedTexts}`);
+      toast(`整形しました（${parts.join('・') || '変更'}）${failed.length ? ' ／ 読めなかった文字は残しています' : ''}`);
+    }
+  } catch (err) {
+    console.error(err);
+    toast('整形中にエラーが起きました', { kind: 'error' });
+  } finally {
+    ocrRunning = false;
+    $('ocrBtn').disabled = false;
+  }
+}
+
+// ---------- 選択中ツールバー ----------
+const SHAPE_BUTTONS = [
+  ['rect', '四角（処理）', 'M4 6h16v12H4z'],
+  ['round', '角丸（開始・終了）', 'M9 6h6a6 6 0 010 12H9A6 6 0 019 6z'],
+  ['diamond', 'ひし形（分岐）', 'M12 3l9 9-9 9-9-9z'],
+  ['ellipse', '楕円', 'M12 6c5 0 9 2.7 9 6s-4 6-9 6-9-2.7-9-6 4-6 9-6z'],
+  ['parallelogram', '平行四辺形（入出力）', 'M7 6h14l-4 12H3z'],
+  ['text', 'テキストのみ', 'M5 6h14M12 6v13'],
+];
+
+function renderSelbar({ nodes, edges }) {
+  const bar = $('selbar');
+  if (!nodes.length && !edges.length) {
+    bar.hidden = true;
+    bar.replaceChildren();
+    return;
+  }
+  bar.hidden = false;
+  const items = [];
+  if (nodes.length) {
+    const ns = nodes.map((id) => doc.node(id)).filter(Boolean);
+    const shape = ns.every((n) => n.shape === ns[0]?.shape) ? ns[0]?.shape : null;
+    const color = ns.every((n) => n.color === ns[0]?.color) ? ns[0]?.color : null;
+    for (const [s, title, d] of SHAPE_BUTTONS) {
+      items.push(
+        el('button', { class: `icon-btn${shape === s ? ' active' : ''}`, title, 'aria-label': title, onclick: () => updateNodes(nodes, { shape: s }) }, icon(d)),
+      );
+    }
+    items.push(el('span', { class: 'divider' }));
+    for (const c of COLORS) {
+      items.push(el('button', { class: `swatch c-${c}${color === c ? ' active' : ''}`, title: colorName(c), 'aria-label': colorName(c), onclick: () => updateNodes(nodes, { color: c }) }));
+    }
+    items.push(el('span', { class: 'divider' }));
+    if (nodes.length === 1) {
+      items.push(el('button', { class: 'icon-btn', title: '文字を編集（Enter）', 'aria-label': '文字を編集', onclick: () => canvas.startEdit('node', nodes[0]) }, icon('M4 20h4L19 9l-4-4L4 16z')));
+      items.push(el('button', { class: 'icon-btn', title: '下に次のノードを追加（Tab）', 'aria-label': '下に次のノードを追加', onclick: () => canvas.addConnected(nodes[0], 'bottom') }, icon('M12 4v12M7 11l5 5 5-5M6 20h12')));
+    }
+    items.push(el('button', { class: 'icon-btn', title: '複製（Ctrl+D）', 'aria-label': '複製', onclick: () => canvas.duplicateSelection() }, icon('M8 8h12v12H8zM4 16V4h12')));
+  }
+  if (edges.length) {
+    if (nodes.length) items.push(el('span', { class: 'divider' }));
+    const es = edges.map((id) => doc.edge(id)).filter(Boolean);
+    const style = es.every((e) => e.style === es[0]?.style) ? es[0]?.style : null;
+    const arrow = es.every((e) => e.arrow);
+    items.push(el('button', { class: `icon-btn${style === 'orthogonal' ? ' active' : ''}`, title: 'カギ線', 'aria-label': 'カギ線', onclick: () => updateEdges(edges, { style: 'orthogonal' }) }, icon('M4 18h7V6h9')));
+    items.push(el('button', { class: `icon-btn${style === 'straight' ? ' active' : ''}`, title: '直線', 'aria-label': '直線', onclick: () => updateEdges(edges, { style: 'straight' }) }, icon('M4 20L20 4')));
+    items.push(el('button', { class: `icon-btn${arrow ? ' active' : ''}`, title: '矢印の表示', 'aria-label': '矢印の表示', onclick: () => updateEdges(edges, { arrow: !arrow }) }, icon('M4 12h15M14 7l5 5-5 5')));
+    items.push(el('button', { class: 'icon-btn', title: '向きを反対にする', 'aria-label': '向きを反対にする', onclick: () => reverseEdges(edges) }, icon('M7 7h13M16 3l4 4-4 4M17 17H4M8 13l-4 4 4 4')));
+    if (edges.length === 1) {
+      items.push(el('button', { class: 'icon-btn', title: 'ラベルを編集', 'aria-label': 'ラベルを編集', onclick: () => canvas.startEdit('edge', edges[0]) }, icon('M4 20h4L19 9l-4-4L4 16z')));
+    }
+  }
+  items.push(el('span', { class: 'divider' }));
+  items.push(el('button', { class: 'icon-btn btn danger', title: '削除（Delete）', 'aria-label': '削除', onclick: () => canvas.deleteSelection() }, icon('M5 7h14M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3')));
+  bar.replaceChildren(...items);
+}
+
+function colorName(c) {
+  return { default: '標準', blue: '青', green: '緑', yellow: '黄', red: '赤', purple: '紫', gray: 'グレー' }[c] || c;
+}
+
+function updateNodes(ids, patch) {
+  const tx = doc.tx();
+  for (const id of ids) {
+    const n = doc.node(id);
+    if (!n) continue;
+    const next = { ...n, ...patch };
+    if (patch.shape === 'diamond' && n.shape !== 'diamond') next.h = Math.max(n.h, 80);
+    tx.put('node', { id, ...patch, ...canvas.fitSize(next, n.text) });
+  }
+  tx.commit();
+  renderSelbar({ nodes: [...canvas.selNodes], edges: [...canvas.selEdges] });
+}
+
+function updateEdges(ids, patch) {
+  const tx = doc.tx();
+  for (const id of ids) if (doc.edge(id)) tx.put('edge', { id, ...patch });
+  tx.commit();
+  renderSelbar({ nodes: [...canvas.selNodes], edges: [...canvas.selEdges] });
+}
+
+function reverseEdges(ids) {
+  const tx = doc.tx();
+  for (const id of ids) {
+    const e = doc.edge(id);
+    if (e) tx.put('edge', { id, from: e.to, to: e.from });
+  }
+  tx.commit();
+}
+
+// ---------- 書き出し・読み込み ----------
+function exportBoard() {
+  const data = {
+    format: 'flowchart-board',
+    version: 1,
+    name: doc.board.name || boardName(doc.id),
+    nodes: doc.nodes().map(({ u, c, ...n }) => n),
+    edges: doc.edges().map(({ u, c, ...e }) => e),
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = el('a', { href: URL.createObjectURL(blob), download: `${data.name.replace(/[\\/:*?"<>|]/g, '_')}.json` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+async function importBoard(file) {
+  try {
+    const data = JSON.parse(await file.text());
+    if (!Array.isArray(data.nodes)) throw new Error('format');
+    const id = await createBoard(data.name ? `${data.name}（読み込み）` : file.name.replace(/\.json$/, ''));
+    const tx = doc.tx();
+    const idMap = new Map();
+    for (const n of data.nodes) {
+      const nid = isValidId(n.id) ? n.id : uid();
+      idMap.set(n.id, nid);
+      tx.put('node', { ...n, id: nid });
+    }
+    for (const e of data.edges || []) {
+      if (idMap.has(e.from) && idMap.has(e.to)) tx.put('edge', { ...e, id: isValidId(e.id) ? e.id : uid(), from: idMap.get(e.from), to: idMap.get(e.to) });
+    }
+    if (doc.id === id) tx.commit({ history: false });
+    canvas.fit();
+    toast(`${data.nodes.length} 個のノードを読み込みました`);
+  } catch {
+    toast('読み込めないファイルです', { kind: 'error' });
+  }
+}
+
+// ---------- UI ----------
+function toggleSidebar(open) {
+  const app = $('app');
+  const isOpen = !app.classList.contains('sidebar-closed');
+  const next = open ?? !isOpen;
+  app.classList.toggle('sidebar-closed', !next);
+  $('scrim').hidden = !(next && window.matchMedia('(max-width: 900px)').matches);
+  localStorage.setItem('fc:sidebar', next ? '1' : '0');
+  setTimeout(() => canvas.requestRender(), 220);
+}
+
+function setTool(tool) {
+  canvas.setTool(tool);
+  document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
+  updateHint();
+}
+
+function updateUndo() {
+  $('undoBtn').disabled = !doc.undoStack.length && !canvas.ink.length;
+  $('redoBtn').disabled = !doc.redoStack.length;
+}
+
+function updateHint() {
+  const coarse = window.matchMedia('(pointer: coarse)').matches;
+  let hint = '';
+  if (canvas.ink.length) {
+    hint = '書き終わったら「整形 OCR」を押すと、図形・矢印・文字に変換されます';
+  } else if (!doc.nodes().length) {
+    hint = canvas.tool === 'draw'
+      ? '四角・ひし形・丸を描き、中に文字、間に矢印を書いてみましょう'
+      : coarse
+        ? 'ダブルタップでノードを追加 ／ ペンで手書き ／ 2本指で移動・拡大'
+        : 'ダブルクリックでノードを追加 ／ ドラッグで移動 ／ Ctrl+ホイールで拡大';
+  }
+  $('hint').textContent = hint;
+}
+
+function bindUI() {
+  $('menuBtn').addEventListener('click', () => toggleSidebar());
+  $('scrim').addEventListener('click', () => toggleSidebar(false));
+  $('newBoard').addEventListener('click', async () => {
+    const name = await ask('新しいボードの名前', `ボード ${state.boards.length + 1}`, { okLabel: '作成' });
+    if (name !== null) {
+      await createBoard(name);
+      if (window.matchMedia('(max-width: 900px)').matches) toggleSidebar(false);
+    }
+  });
+  $('boardName').addEventListener('change', (e) => {
+    const name = e.target.value.trim();
+    if (name && state.currentId) applyRename(state.currentId, name);
+    else e.target.value = boardName(state.currentId);
+  });
+  $('boardName').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') e.target.blur();
+  });
+  document.querySelectorAll('[data-tool]').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
+  $('ocrBtn').addEventListener('click', runOCR);
+  $('clearInk').addEventListener('click', () => canvas.clearInk());
+  $('addNode').addEventListener('click', () => {
+    const r = canvas.rect();
+    const at = canvas.toWorld({ x: r.width / 2, y: r.height / 2 });
+    // 画面中央が埋まっていたら少しずらす
+    for (let i = 0; i < 30 && canvas.nodeAt(at); i++) at.y += 90;
+    canvas.addNodeAt(at);
+  });
+  $('undoBtn').addEventListener('click', undo);
+  $('redoBtn').addEventListener('click', redo);
+  $('zoomIn').addEventListener('click', () => canvas.zoomBy(1.25));
+  $('zoomOut').addEventListener('click', () => canvas.zoomBy(0.8));
+  $('zoomLabel').addEventListener('click', () => {
+    const r = canvas.rect();
+    canvas.zoomAt({ x: r.width / 2, y: r.height / 2 }, 1 / canvas.view.k);
+  });
+  $('fitBtn').addEventListener('click', () => canvas.fit());
+  $('exportBtn').addEventListener('click', exportBoard);
+  $('importInput').addEventListener('change', (e) => {
+    const f = e.target.files?.[0];
+    if (f) importBoard(f);
+    e.target.value = '';
+  });
+
+  window.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (t instanceof HTMLInputElement || t?.isContentEditable || $('dialog').open) return;
+    const mod = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+    if (mod && key === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) redo();
+      else undo();
+      return;
+    }
+    if (mod && key === 'y') {
+      e.preventDefault();
+      redo();
+      return;
+    }
+    if (canvas.handleKey(e)) {
+      e.preventDefault();
+      return;
+    }
+    if (mod || e.altKey) return;
+    if (key === 'v') setTool('select');
+    else if (key === 'p') setTool('draw');
+    else if (key === 'f') canvas.fit();
+    else if (key === '+' || key === '=') canvas.zoomBy(1.25);
+    else if (key === '-') canvas.zoomBy(0.8);
+    else if (key === 'r' && canvas.ink.length) runOCR();
+  });
+
+  canvas.addEventListener('selection', (e) => renderSelbar(e.detail));
+  canvas.addEventListener('view', () => {
+    $('zoomLabel').textContent = `${Math.round(canvas.view.k * 100)}%`;
+    saveViewSoon();
+  });
+  canvas.addEventListener('ink', (e) => {
+    const n = e.detail;
+    $('inkCount').hidden = !n;
+    $('inkCount').textContent = String(n);
+    updateUndo();
+    updateHint();
+  });
+  canvas.addEventListener('tool', updateHint);
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      saveView();
+      saveCache.flush();
+      sync?.flushNow();
+    } else {
+      sync?.reconnectNow();
+    }
+  });
+  window.addEventListener('online', () => sync?.reconnectNow());
+  window.addEventListener('pagehide', () => {
+    saveView();
+    sync?.flushNow();
+  });
+}
+
+const saveViewSoon = debounce(saveView, 400);
+
+function undo() {
+  canvas.finishEdit();
+  if (!doc.undo()) canvas.undoInk();
+  updateUndo();
+}
+
+function redo() {
+  canvas.finishEdit();
+  doc.redo();
+  updateUndo();
+}
+
+// ---------- 起動 ----------
+async function main() {
+  bindUI();
+  if (localStorage.getItem('fc:sidebar') === '0' || window.matchMedia('(max-width: 900px)').matches) {
+    $('app').classList.add('sidebar-closed');
+  }
+  setTool('select');
+  await ensureAuth();
+
+  sync = new Sync({ token: state.token });
+  await sync.init();
+  sync.addEventListener('status', updateStatus);
+  sync.addEventListener('pending', updateStatus);
+  sync.addEventListener('boards', (e) => setBoards(e.detail));
+  sync.addEventListener('board-deleted', (e) => onBoardDeleted(e.detail));
+  sync.addEventListener('snapshot', (e) => {
+    const snap = e.detail;
+    if (snap.id !== doc.id) return;
+    sync.flushNow();
+    const keep = new Set(sync.pendingOps(snap.id).map((op) => `${op.k}:${op.id}`));
+    doc.mergeSnapshot(snap, keep);
+    const b = state.boards.find((x) => x.id === snap.id);
+    if (b && snap.name && b.name !== snap.name) {
+      b.name = snap.name;
+      renderBoardList();
+    }
+    if (snap.name) $('boardName').value = snap.name;
+    saveCache();
+    updateHint();
+  });
+  sync.addEventListener('ops', (e) => doc.applyRemote(e.detail));
+
+  doc.addEventListener('change', (e) => {
+    const { ops, local } = e.detail;
+    if (local && ops.length) sync.send(doc.id, ops);
+    saveCache();
+    updateUndo();
+    if (!e.detail.reset) updateHint();
+    if (canvas.selNodes.size || canvas.selEdges.size) {
+      if (!canvas.action) renderSelbar({ nodes: [...canvas.selNodes], edges: [...canvas.selEdges] });
+    }
+  });
+
+  state.boards = (await idbGet('boards')) || [];
+  setBoards(state.boards.filter((b) => !b.local));
+  sync.connect();
+
+  // 最初に開くボード: 前回のボード → 一覧の先頭 → サーバーの一覧を待つ → 新規作成
+  const last = localStorage.getItem('fc:lastBoard');
+  let target = state.boards.find((b) => b.id === last)?.id || (last && (await idbGet(`board:${last}`)) ? last : null);
+  if (!target && state.boards.length) target = state.boards[0].id;
+  if (!target) {
+    const list = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), 2500);
+      sync.addEventListener(
+        'boards',
+        (e) => {
+          clearTimeout(timer);
+          resolve(e.detail);
+        },
+        { once: true },
+      );
+    });
+    target = list?.[0]?.id;
+  }
+  if (target) await openBoard(target);
+  else await createBoard('はじめてのボード');
+
+  if ('serviceWorker' in navigator && window.isSecureContext) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
+}
+
+main();
+
+// テストやデバッグ用
+window.__flow = { doc, canvas, get sync() { return sync; }, state, runOCR };

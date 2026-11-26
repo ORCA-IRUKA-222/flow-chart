@@ -1,0 +1,17 @@
+{
+  "name": "flow-chart",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PC とタブレットで同期できる、無限キャンバスのフローチャート作成アプリ",
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
