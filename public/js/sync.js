@@ -32,6 +32,7 @@ export class Sync extends EventTarget {
   }
 
   async save() {
+    if (this.stopped) return;
     await idbSet('pending', this.pending);
     await idbSet('localCreated', this.localCreated);
     await idbSet('queuedBoardOps', this.queued);
@@ -50,6 +51,32 @@ export class Sync extends EventTarget {
     return this.ws && this.ws.readyState === WebSocket.OPEN;
   }
 
+  /** 同期先があるか */
+  get enabled() {
+    return Boolean(this.server);
+  }
+
+  /** 文字認識を中継できるサーバー */
+  get apiServer() {
+    return this.server;
+  }
+
+  get label() {
+    return this.server || '';
+  }
+
+  /** 設定を変える前に止める（送信待ちを保存してから） */
+  async stop() {
+    this.flushOutbox();
+    this.persist.flush();
+    await this.save();
+    this.stopped = true;
+    clearTimeout(this.retryTimer);
+    const ws = this.ws;
+    this.ws = null;
+    ws?.close();
+  }
+
   /** 同期先を変える（null で同期しない） */
   setServer(server, token = this.token) {
     this.server = server;
@@ -64,6 +91,7 @@ export class Sync extends EventTarget {
 
   connect() {
     clearTimeout(this.retryTimer);
+    if (this.stopped) return;
     if (!this.server) {
       this.setStatus('local');
       return;

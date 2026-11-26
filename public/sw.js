@@ -1,5 +1,5 @@
 // オフラインでもアプリを開けるようにするサービスワーカー（https または localhost のときだけ動く）
-const CACHE = 'flowchart-v2';
+const CACHE = 'flowchart-v3';
 // sw.js からの相対パス（PC のサーバーでも GitHub Pages のサブフォルダでも動くように）
 const SHELL = [
   './',
@@ -11,6 +11,7 @@ const SHELL = [
   'js/canvas.js',
   'js/config.js',
   'js/doc.js',
+  'js/github-sync.js',
   'js/geometry.js',
   'js/handwriting.js',
   'js/idb.js',

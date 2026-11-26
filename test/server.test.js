@@ -164,3 +164,19 @@ test('別の場所（GitHub Pages など）から開いたアプリも API を�
     await rm(app.dir, { recursive: true, force: true });
   }
 });
+
+test('ボードの合成: 順番によらず同じ結果で、新しい方が残る', async () => {
+  const { mergeBoards, hasNewer } = await import('../public/shared/ops.js');
+  const a = { id: 'b', name: 'A', nameU: 5, nodes: { x: { id: 'x', text: 'a', u: 10, c: 'a' }, y: { id: 'y', u: 3, c: 'a' } }, edges: {} };
+  const b = { id: 'b', name: 'B', nameU: 9, nodes: { x: { id: 'x', text: 'b', u: 8, c: 'b' }, z: { id: 'z', deleted: true, u: 4, c: 'b' } }, edges: { e: { id: 'e', u: 1, c: 'b' } } };
+  const ab = mergeBoards(a, b);
+  const ba = mergeBoards(b, a);
+  assert.deepEqual(ab.nodes, ba.nodes);
+  assert.deepEqual(ab.edges, ba.edges);
+  assert.equal(ab.nodes.x.text, 'a');
+  assert.equal(ab.name, 'B');
+  assert.equal(ba.name, 'B');
+  assert.equal(hasNewer(ab, b), true);
+  assert.equal(hasNewer(b, ab), false);
+  assert.equal(hasNewer(ab, ab), false);
+});

@@ -9,6 +9,52 @@
 // 「この端末だけ」で動き、同期先を設定するとそこへ送る。
 
 const KEY = 'fc:server';
+const SYNC_KEY = 'fc:sync';
+const GH_TOKEN_KEY = 'fc:ghToken';
+
+/**
+ * 同期の方式。
+ *   { mode: 'local' }                     この端末だけ
+ *   { mode: 'github', repo: 'owner/name' } GitHub のリポジトリに保存（トークンは別に保存）
+ *   { mode: 'server', server: 'https://…' } 自分の同期サーバー
+ *   null                                   未設定（アプリを配信しているサーバーがあれば自動でそこ）
+ */
+export function getSyncConfig() {
+  try {
+    const v = JSON.parse(localStorage.getItem(SYNC_KEY));
+    return v && typeof v.mode === 'string' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setSyncConfig(cfg) {
+  localStorage.setItem(SYNC_KEY, JSON.stringify(cfg));
+  localStorage.removeItem(KEY);
+}
+
+export function githubToken() {
+  return localStorage.getItem(GH_TOKEN_KEY) || '';
+}
+
+export function setGithubToken(token) {
+  if (token) localStorage.setItem(GH_TOKEN_KEY, token);
+  else localStorage.removeItem(GH_TOKEN_KEY);
+}
+
+/** テスト用に GitHub API の場所を差し替えられる */
+export function githubApi() {
+  return localStorage.getItem('fc:ghApi') || 'https://api.github.com';
+}
+
+export function normalizeRepo(value) {
+  const s = String(value || '')
+    .trim()
+    .replace(/^https?:\/\/github\.com\//i, '')
+    .replace(/\.git$/i, '')
+    .replace(/\/+$/, '');
+  return /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(s) ? s : null;
+}
 const AUTO_KEY = 'fc:serverAuto';
 
 export function normalizeServer(url) {

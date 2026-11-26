@@ -102,16 +102,48 @@
     <dialog id="syncDialog">
       <form method="dialog" id="syncForm">
         <p class="dialog-title">同期の設定</p>
-        <p class="dialog-text">
-          同期先がなくても、この端末だけで使えます（データは端末に保存されます）。<br />
-          同期サーバーのアドレスを入れると、この端末のボードをそこへ送り、他の端末と同期します。
-        </p>
-        <input id="syncInput" type="url" inputmode="url" autocomplete="off" placeholder="例: https://my-pc.example.ts.net" />
+        <div class="mode-list" role="radiogroup" aria-label="同期の方式">
+          <label class="mode">
+            <input type="radio" name="mode" value="local" />
+            <span><b>この端末だけ</b><small>同期しません。データはこの端末に保存されます</small></span>
+          </label>
+          <label class="mode">
+            <input type="radio" name="mode" value="github" />
+            <span><b>GitHub に保存（PC 不要・おすすめ）</b><small>GitHub の非公開リポジトリに保存し、どの端末からでも同期します（約10秒ごと）</small></span>
+          </label>
+          <label class="mode">
+            <input type="radio" name="mode" value="server" />
+            <span><b>自分の同期サーバー</b><small>PC などで動かすサーバーと、すぐに同期します</small></span>
+          </label>
+        </div>
+
+        <div class="mode-fields" data-for="github" hidden>
+          <label class="field">データを保存するリポジトリ
+            <input id="ghRepo" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="例: orca-iruka-222/flow-chart-data" />
+          </label>
+          <label class="field">アクセストークン
+            <input id="ghToken" type="password" autocomplete="off" placeholder="github_pat_…" />
+          </label>
+          <details class="dialog-note">
+            <summary>リポジトリとトークンの作り方</summary>
+            <ol>
+              <li>GitHub で<a href="https://github.com/new" target="_blank" rel="noopener">新しいリポジトリ</a>を <b>Private（非公開）</b> で作る（名前は例: flow-chart-data）</li>
+              <li><a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">Fine-grained token の作成画面</a>で、Repository access を「Only select repositories」にしてそのリポジトリだけを選ぶ</li>
+              <li>Permissions の Repository permissions で <b>Contents</b> を「Read and write」にして作成</li>
+              <li>表示されたトークンを上に貼り付ける（各端末で1回）</li>
+            </ol>
+          </details>
+        </div>
+
+        <div class="mode-fields" data-for="server" hidden>
+          <label class="field">サーバーのアドレス
+            <input id="syncInput" type="url" inputmode="url" autocomplete="off" placeholder="例: https://my-pc.example.ts.net" />
+          </label>
+        </div>
+
         <p id="syncCurrent" class="dialog-note"></p>
         <p id="syncError" class="dialog-error"></p>
-        <div class="dialog-actions wrap">
-          <button value="local" class="btn">この端末だけで使う</button>
-          <span class="spacer"></span>
+        <div class="dialog-actions">
           <button value="cancel" class="btn" formnovalidate>キャンセル</button>
           <button value="ok" class="btn primary">保存</button>
         </div>

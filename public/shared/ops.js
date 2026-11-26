@@ -112,3 +112,51 @@ export function boardSummary(board) {
   for (const id in board.nodes) if (!board.nodes[id].deleted) nodeCount++;
   return { id: board.id, name: board.name, updatedAt: board.updatedAt, createdAt: board.createdAt, nodeCount };
 }
+
+function pick(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  return compareStamp(a, b) >= 0 ? a : b;
+}
+
+/**
+ * 2つのボードを合わせる（要素ごとに新しい方を残す）。どちらの順で合わせても同じ結果になる。
+ * ボード名は nameU（名前を変えた時刻）が新しい方を残す。
+ */
+export function mergeBoards(a, b) {
+  if (!a) return b ? { ...b, nodes: { ...b.nodes }, edges: { ...b.edges } } : null;
+  if (!b) return { ...a, nodes: { ...a.nodes }, edges: { ...a.edges } };
+  const nameFromB = (b.nameU || 0) > (a.nameU || 0);
+  const out = {
+    id: a.id || b.id,
+    name: nameFromB ? b.name : a.name,
+    nameU: Math.max(a.nameU || 0, b.nameU || 0),
+    createdAt: Math.min(a.createdAt || Infinity, b.createdAt || Infinity),
+    updatedAt: Math.max(a.updatedAt || 0, b.updatedAt || 0),
+    nodes: {},
+    edges: {},
+  };
+  if (!Number.isFinite(out.createdAt)) out.createdAt = Date.now();
+  for (const k of ['nodes', 'edges']) {
+    const A = a[k] || {};
+    const B = b[k] || {};
+    for (const id in A) out[k][id] = pick(A[id], Object.prototype.hasOwnProperty.call(B, id) ? B[id] : null);
+    for (const id in B) if (!Object.prototype.hasOwnProperty.call(out[k], id)) out[k][id] = B[id];
+  }
+  return out;
+}
+
+/** local に、remote にない（または新しい）内容があれば true */
+export function hasNewer(local, remote) {
+  if (!remote) return true;
+  if ((local.nameU || 0) > (remote.nameU || 0)) return true;
+  for (const k of ['nodes', 'edges']) {
+    const L = local[k] || {};
+    const R = remote[k] || {};
+    for (const id in L) {
+      const r = Object.prototype.hasOwnProperty.call(R, id) ? R[id] : null;
+      if (!r || compareStamp(L[id], r) > 0) return true;
+    }
+  }
+  return false;
+}
