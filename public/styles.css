@@ -1281,3 +1281,50 @@ dialog {
   color: var(--muted);
   margin-top: 2px;
 }
+
+/* 投げ縄の選択範囲 */
+.lasso {
+  fill: color-mix(in srgb, var(--accent) 8%, transparent);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 4;
+}
+
+.ink-selection {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+}
+
+.ink.selected {
+  filter: drop-shadow(0 0 2px var(--accent));
+}
+
+.menu-head {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 6px 10px 2px;
+}
+
+.menu button.cand b {
+  font-size: 16px;
+  font-weight: 500;
+}
+
+#popMenu {
+  width: auto;
+  min-width: 200px;
+  max-width: min(320px, calc(100vw - 16px));
+}
+
+.sel-label {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+.selbar .btn.small {
+  flex: none;
+}

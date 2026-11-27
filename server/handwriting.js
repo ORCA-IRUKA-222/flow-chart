@@ -33,10 +33,15 @@ export function normalizeItems(items) {
   return out;
 }
 
-export function parseResponse(json) {
-  if (!Array.isArray(json) || json[0] !== 'SUCCESS') return null;
+/** 候補の一覧（よさそうな順）。なければ空 */
+export function parseCandidates(json) {
+  if (!Array.isArray(json) || json[0] !== 'SUCCESS') return [];
   const candidates = json[1]?.[0]?.[1];
-  return Array.isArray(candidates) && typeof candidates[0] === 'string' ? candidates[0] : null;
+  return Array.isArray(candidates) ? candidates.filter((c) => typeof c === 'string' && c) : [];
+}
+
+export function parseResponse(json) {
+  return parseCandidates(json)[0] ?? null;
 }
 
 async function recognizeOne(item, lang) {
@@ -47,7 +52,7 @@ async function recognizeOne(item, lang) {
         writing_guide: { writing_area_width: item.w, writing_area_height: item.h },
         ink: item.ink,
         language: lang,
-        max_num_results: 3,
+        max_num_results: 6,
         max_completions: 0,
       },
     ],
@@ -59,7 +64,7 @@ async function recognizeOne(item, lang) {
     signal: AbortSignal.timeout(10000),
   });
   if (!res.ok) throw new Error(`handwriting service returned ${res.status}`);
-  return parseResponse(await res.json());
+  return parseCandidates(await res.json());
 }
 
 export async function recognizeHandwriting(items, lang = 'ja') {
@@ -69,5 +74,5 @@ export async function recognizeHandwriting(items, lang = 'ja') {
   if (errors.length === results.length && results.length > 0) {
     throw errors[0].reason;
   }
-  return results.map((r) => (r.status === 'fulfilled' ? r.value : null));
+  return results.map((r) => (r.status === 'fulfilled' ? r.value : []));
 }

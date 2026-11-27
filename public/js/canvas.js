@@ -35,6 +35,15 @@ export const INSETS = {
 };
 
 const DEFAULT_SIZE = { w: 140, h: 60 };
+const MAX_NODE_W = 480;
+const MIN_NODE_SIZE = {
+  rect: [80, 50],
+  round: [100, 50],
+  parallelogram: [120, 50],
+  diamond: [120, 70],
+  ellipse: [100, 60],
+  text: [40, 30],
+};
 
 export class Canvas extends EventTarget {
   constructor(root, doc) {
@@ -48,6 +57,7 @@ export class Canvas extends EventTarget {
     this.swapPenButtons = false;
     this.selNodes = new Set();
     this.selEdges = new Set();
+    this.selInk = new Set(); // 選択中の手書きの線（整形の範囲にする）
     this.editing = null; // { k: 'node'|'edge', id }
     this.ink = [];
     this.penSeen = false;
@@ -197,14 +207,21 @@ export class Canvas extends EventTarget {
 
   // ---------- 選択 ----------
   emitSelection() {
-    this.emit('selection', { nodes: [...this.selNodes], edges: [...this.selEdges] });
+    this.emit('selection', { nodes: [...this.selNodes], edges: [...this.selEdges], ink: this.selInk.size });
   }
 
-  select(nodes = [], edges = []) {
+  select(nodes = [], edges = [], ink = []) {
     this.selNodes = new Set(nodes);
     this.selEdges = new Set(edges);
+    if (this.selInk.size || ink.length) this.inkDirty = true;
+    this.selInk = new Set(ink);
     this.emitSelection();
     this.requestRender();
+  }
+
+  /** 選択中の手書き（ない場合は空） */
+  selectedInk() {
+    return this.ink.filter((s) => this.selInk.has(s));
   }
 
   pruneSelection() {
@@ -216,11 +233,37 @@ export class Canvas extends EventTarget {
   }
 
   deleteSelection() {
+    // 選択中の手書きも消す（元に戻せる）
+    if (this.selInk.size) {
+      const before = this.ink;
+      const after = before.filter((st) => !this.selInk.has(st));
+      this.selInk = new Set();
+      this.setInk(after);
+      this.emit('ink-history', { type: 'replace', before, after });
+    }
     const tx = this.doc.tx();
     for (const id of this.selNodes) tx.delNode(id);
     for (const id of this.selEdges) tx.del('edge', id);
     if (tx.size) tx.commit();
     this.select();
+  }
+
+  /** 投げ縄で囲んだノード・手書きを選ぶ（中心が囲みの中にあるもの） */
+  finishLasso(a) {
+    const poly = a.points;
+    const nodes = this.doc
+      .nodes()
+      .filter((n) => pointInPolygon(center(n), poly))
+      .map((n) => n.id);
+    const ink = this.ink.filter((st) => {
+      const inside = st.points.filter((q) => pointInPolygon(q, poly)).length;
+      return inside >= st.points.length * 0.6;
+    });
+    if (a.shift) {
+      this.select([...new Set([...this.selNodes, ...nodes])], [...this.selEdges], [...new Set([...this.selInk, ...ink])]);
+    } else {
+      this.select(nodes, [], ink);
+    }
   }
 
   // ---------- ノード操作 ----------
@@ -332,6 +375,25 @@ export class Canvas extends EventTarget {
     // 末尾の改行も高さに含める
     if (text.endsWith('\n')) m.textContent += ' ';
     return { w: m.offsetWidth, h: m.offsetHeight };
+  }
+
+  /**
+   * 文字がちょうど収まる大きさ（形ごとの最小サイズ以上）。
+   * fixedW を渡すと、その幅のときに必要な高さを返す。
+   */
+  requiredSize(shape, text, fixedW) {
+    const ins = INSETS[shape] || INSETS.rect;
+    const [minW, minH] = MIN_NODE_SIZE[shape] || MIN_NODE_SIZE.rect;
+    const t = text || '';
+    let w = fixedW;
+    if (!w) {
+      // いちばん長い行が1行に収まる幅（長すぎる場合は折り返す）
+      const natural = this.measure(t, 100000);
+      w = Math.max(minW, Math.min(MAX_NODE_W, Math.ceil((natural.w + ins.pad * 2 + 6) / ins.rx / (GRID * 2)) * GRID * 2));
+    }
+    const wrapped = this.measure(t, w * ins.rx - ins.pad * 2);
+    const h = Math.max(minH, Math.ceil((wrapped.h + ins.pad * 2 + 4) / ins.ry / GRID) * GRID);
+    return { w, h };
   }
 
   /** 文字が収まるようにノードを大きくする（小さくはしない） */
@@ -543,7 +605,7 @@ export class Canvas extends EventTarget {
       default:
         // マウスは Shift + ドラッグ、ペンはそのままドラッグで範囲選択
         if ((base.shift && e.pointerType === 'mouse') || (e.pointerType === 'pen' && this.tool === 'select')) {
-          this.action = { ...base, type: 'box', cur: w };
+          this.action = { ...base, type: 'lasso', points: [w] };
         } else {
           this.action = { ...base, type: 'pan', view: { ...this.view } };
         }
@@ -620,10 +682,15 @@ export class Canvas extends EventTarget {
         this.requestRender();
         break;
       }
-      case 'box':
-        a.cur = w;
+      case 'lasso': {
+        const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+        for (const ev of events.length ? events : [e]) {
+          const q = this.toWorld(this.screenPoint(ev));
+          if (dist(a.points[a.points.length - 1], q) * this.view.k >= 3) a.points.push(q);
+        }
         this.requestRender();
         break;
+      }
       default:
         break;
     }
@@ -740,12 +807,14 @@ export class Canvas extends EventTarget {
       case 'connect':
         this.finishConnect(a, w);
         break;
-      case 'box': {
-        const box = normRect(a.wx, a.wy, a.cur.x, a.cur.y);
-        const ids = this.doc.nodes().filter((n) => rectsIntersect(n, box)).map((n) => n.id);
-        this.select([...new Set([...this.selNodes, ...ids])], [...this.selEdges]);
+      case 'lasso':
+        if (!a.moved || a.points.length < 3) {
+          if (!a.shift) this.select();
+          this.handleTap({ ...a, hit: { type: 'empty' } }, w);
+        } else {
+          this.finishLasso(a);
+        }
         break;
-      }
       case 'pan':
         if (!a.moved && a.hit.type === 'empty') {
           if (!a.shift) this.select();
@@ -994,6 +1063,12 @@ export class Canvas extends EventTarget {
 
   setInk(strokes) {
     this.ink = strokes;
+    if (this.selInk.size) {
+      const alive = new Set(strokes);
+      const before = this.selInk.size;
+      this.selInk = new Set([...this.selInk].filter((st) => alive.has(st)));
+      if (this.selInk.size !== before) this.emitSelection();
+    }
     this.inkDirty = true;
     this.requestRender();
     this.emit('ink', this.ink.length);
@@ -1191,7 +1266,8 @@ export class Canvas extends EventTarget {
     this.inkDirty = false;
     for (const child of [...this.inkG.children]) if (child !== this.liveStroke) child.remove();
     for (const s of this.ink) {
-      this.inkG.insertBefore(svg('path', { class: `ink ink-${s.kind || 'any'}`, d: inkPath(s.points), 'stroke-width': s.width }), this.liveStroke || null);
+      const cls = `ink ink-${s.kind || 'any'}${this.selInk.has(s) ? ' selected' : ''}`;
+      this.inkG.insertBefore(svg('path', { class: cls, d: inkPath(s.points), 'stroke-width': s.width }), this.liveStroke || null);
     }
   }
 
@@ -1219,11 +1295,19 @@ export class Canvas extends EventTarget {
         o.append(svg('circle', { class: 'connect-dot', cx: e.x, cy: e.y, r: 5 }));
       }
     }
-    if (a?.type === 'box' && a.moved) {
-      const s = this.toScreen({ x: a.wx, y: a.wy });
-      const e = this.toScreen(a.cur);
-      const r = normRect(s.x, s.y, e.x, e.y);
-      o.append(svg('rect', { class: 'box-select', x: r.x, y: r.y, width: r.w, height: r.h }));
+    if (a?.type === 'lasso' && a.moved && a.points.length > 1) {
+      const pts = a.points.map((q) => this.toScreen(q));
+      o.append(svg('path', { class: 'lasso', d: `M${pts.map((q) => `${q.x.toFixed(1)} ${q.y.toFixed(1)}`).join(' L')} Z` }));
+    }
+    // 選択中の手書きを点線の枠で囲む
+    if (this.selInk.size && !(a && a.type === 'lasso')) {
+      const sel = this.selectedInk();
+      if (sel.length) {
+        const b = boxOfPoints(sel.flatMap((st) => st.points));
+        const p1 = this.toScreen({ x: b.x, y: b.y });
+        const p2 = this.toScreen({ x: b.x + b.w, y: b.y + b.h });
+        o.append(svg('rect', { class: 'ink-selection', x: p1.x - 8, y: p1.y - 8, width: p2.x - p1.x + 16, height: p2.y - p1.y + 16, rx: 6 }));
+      }
     }
   }
 
@@ -1392,6 +1476,16 @@ function inkPath(pts) {
   }
   const last = pts[pts.length - 1];
   return `${d} L${last.x.toFixed(1)} ${last.y.toFixed(1)}`;
+}
+
+function pointInPolygon(p, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i];
+    const b = poly[j];
+    if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y || 1e-9) + a.x) inside = !inside;
+  }
+  return inside;
 }
 
 function distToSeg(p, a, b) {

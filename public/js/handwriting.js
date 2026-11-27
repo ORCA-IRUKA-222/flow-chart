@@ -34,7 +34,7 @@ async function recognizeNative(rec, line) {
   }
   const preds = await drawing.getPrediction();
   drawing.clear?.();
-  return preds?.[0]?.text?.trim() || null;
+  return (preds || []).map((p) => p.text?.trim()).filter(Boolean);
 }
 
 /** 1行分の線を Google 形式の ink に変換（左上を原点、表示倍率をかけて画面相当の大きさに） */
@@ -66,7 +66,7 @@ async function recognizeDirect(item, lang) {
           writing_guide: { writing_area_width: item.w, writing_area_height: item.h },
           ink: item.ink,
           language: lang,
-          max_num_results: 3,
+          max_num_results: 6,
           max_completions: 0,
         },
       ],
@@ -76,7 +76,7 @@ async function recognizeDirect(item, lang) {
   if (!res.ok) throw new Error(String(res.status));
   const json = await res.json();
   const cands = json?.[0] === 'SUCCESS' ? json[1]?.[0]?.[1] : null;
-  return Array.isArray(cands) && typeof cands[0] === 'string' ? cands[0] : null;
+  return Array.isArray(cands) ? cands.filter((c) => typeof c === 'string' && c) : [];
 }
 
 /**
@@ -87,6 +87,12 @@ async function recognizeDirect(item, lang) {
  */
 export async function recognizeLines(lines, { lang = 'ja', k = 1, token = '', server = null } = {}) {
   const results = new Array(lines.length).fill(null);
+  // 各行の候補（1つ目が results と同じ）。間違えたときに選び直せるようにする
+  const candidates = lines.map(() => []);
+  const setCands = (i, list) => {
+    candidates[i] = [...new Set(list.filter(Boolean))];
+    results[i] = candidates[i][0] || null;
+  };
   let reached = false;
   const rec = await nativeRecognizer(lang);
   if (rec) {
@@ -94,7 +100,7 @@ export async function recognizeLines(lines, { lang = 'ja', k = 1, token = '', se
     await Promise.all(
       lines.map(async (line, i) => {
         try {
-          results[i] = await recognizeNative(rec, line);
+          setCands(i, await recognizeNative(rec, line));
         } catch {
           results[i] = null;
         }
@@ -113,7 +119,7 @@ export async function recognizeLines(lines, { lang = 'ja', k = 1, token = '', se
       });
       if (!res.ok) throw new Error(String(res.status));
       const json = await res.json();
-      rest.forEach((i, j) => (results[i] = json.results?.[j] || null));
+      rest.forEach((i, j) => setCands(i, json.candidates?.[j] || [json.results?.[j]]));
       reached = true;
     } catch {
       // サーバーに届かない → 端末から直接試す
@@ -125,9 +131,9 @@ export async function recognizeLines(lines, { lang = 'ja', k = 1, token = '', se
     settled.forEach((r, j) => {
       if (r.status === 'fulfilled') {
         reached = true;
-        results[rest[j]] = r.value;
+        setCands(rest[j], r.value);
       }
     });
   }
-  return { results, ok: reached };
+  return { results, candidates, ok: reached };
 }

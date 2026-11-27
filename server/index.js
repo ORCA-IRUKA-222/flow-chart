@@ -87,8 +87,9 @@ export async function createServer({ dataDir = DATA_DIR, token = TOKEN, recogniz
       const items = normalizeItems(body?.items);
       if (!items) return sendJson(res, 400, { error: 'invalid ink' });
       try {
-        const results = await recognize(items, body.lang);
-        return sendJson(res, 200, { results });
+        // 各行の候補一覧。results は1つ目の候補（古いアプリとの互換のため）
+        const candidates = (await recognize(items, body.lang)).map((c) => (Array.isArray(c) ? c : c ? [c] : []));
+        return sendJson(res, 200, { results: candidates.map((c) => c[0] ?? null), candidates });
       } catch (err) {
         console.warn('[recognize] 手書き認識サービスに接続できませんでした:', err.message);
         return sendJson(res, 502, { error: 'recognition service unavailable' });

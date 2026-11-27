@@ -131,14 +131,14 @@ test('文字認識の中継: 入力の検証と、結果の取り出し', async 
   assert.equal(parseResponse(['SUCCESS', [['id', ['開始', '閉始'], [], {}]]]), '開始');
   assert.equal(parseResponse(['FAILED']), null);
 
-  const app = await start({ recognize: async (list) => list.map(() => 'はい') });
+  const app = await start({ recognize: async (list) => list.map(() => ['はい', 'ほい']) });
   try {
     const res = await fetch(`http://127.0.0.1:${app.port}/api/recognize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ items: [{ w: 100, h: 50, ink: [[[1, 2], [3, 4]]] }] }),
     });
-    assert.deepEqual(await res.json(), { results: ['はい'] });
+    assert.deepEqual(await res.json(), { results: ['はい'], candidates: [['はい', 'ほい']] });
   } finally {
     await app.close();
     await rm(app.dir, { recursive: true, force: true });

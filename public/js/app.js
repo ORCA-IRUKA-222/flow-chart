@@ -25,7 +25,7 @@ import { debounce, el, hideToast, toast, uid } from './util.js';
 const $ = (id) => document.getElementById(id);
 
 // アプリを更新したら、sw.js の CACHE と一緒に変える
-export const APP_VERSION = '2026.11.27-1';
+export const APP_VERSION = '2026.11.27-2';
 
 const clientId = (() => {
   let id = localStorage.getItem('fc:client');
@@ -449,8 +449,13 @@ async function runOCR(mode = 'all') {
   canvas.finishEdit();
   closeOcrMenu();
   const strokes = canvas.ink;
+  // 範囲を選んでいれば、その中の手書きだけを整形する
+  const onlySelected = canvas.selInk.size > 0;
   // 対象にする手書き（文字ペン・図形ペンの区別で絞る。区別のない古い手書きはどちらにも含める）
-  const subset = strokes.map((s, i) => i).filter((i) => (mode === 'shapes' ? strokes[i].kind !== 'text' : mode === 'text' ? strokes[i].kind !== 'shape' : true));
+  const subset = strokes
+    .map((s, i) => i)
+    .filter((i) => !onlySelected || canvas.selInk.has(strokes[i]))
+    .filter((i) => (mode === 'shapes' ? strokes[i].kind !== 'text' : mode === 'text' ? strokes[i].kind !== 'shape' : true));
   if (!subset.length) {
     toast(
       mode === 'shapes'
@@ -514,6 +519,20 @@ async function runOCR(mode = 'all') {
         .trim();
     });
 
+    // 間違えたときに選び直せるよう、候補の組み合わせも作っておく（行ごとに j 番目の候補をつなげる）
+    const altsOf = result.texts.map((_, i) => {
+      const [start, count] = spans[i];
+      const out = [];
+      for (let j = 0; j < 6; j++) {
+        const text = Array.from({ length: count }, (_, l) => (recog.candidates?.[start + l] || [])[j] ?? recog.results[start + l])
+          .filter(Boolean)
+          .join('\n')
+          .trim();
+        if (text && !out.includes(text)) out.push(text);
+      }
+      return out;
+    });
+
     const keepStrokes = new Set([...result.leftover, ...skipped]);
     const failed = [];
     result.texts.forEach((t, i) => {
@@ -539,13 +558,18 @@ async function runOCR(mode = 'all') {
       existing.filter((n) => rectsIntersect(n, vis)),
     ).map((n) => ({ ...n, x: snap(n.x, 5), y: snap(n.y, 5), z: ++z }));
     shapeNodes.forEach((n) => tx.put('node', n));
+    result.texts.forEach((t, i) => {
+      if (t.target.type === 'shape' && textOf[i]) textCandidates.set(`node:${shapeNodes[t.target.index].id}`, altsOf[i]);
+    });
 
     // 既存ノードの中に書いた文字 → 文字を追加
     result.texts.forEach((t, i) => {
       if (t.target.type !== 'node' || !textOf[i]) return;
       const n = doc.node(t.target.id);
-      const text = n.text ? `${n.text}\n${textOf[i]}` : textOf[i];
+      const prefix = n.text ? `${n.text}\n` : '';
+      const text = prefix + textOf[i];
       tx.put('node', { id: n.id, text, ...canvas.fitSize(n, text) });
+      textCandidates.set(`node:${n.id}`, altsOf[i].map((a) => prefix + a));
     });
 
     // 矢印 → 線
@@ -565,13 +589,19 @@ async function runOCR(mode = 'all') {
         if (label) tx.put('edge', { id: exists.id, label });
         return;
       }
-      tx.put('edge', { id: uid(), from, to, label, style: 'orthogonal', arrow: true });
+      const edgeId = uid();
+      tx.put('edge', { id: edgeId, from, to, label, style: 'orthogonal', arrow: true });
+      const li = result.texts.findIndex((t) => t.target.type === 'connector' && t.target.index === index);
+      if (li >= 0 && textOf[li]) textCandidates.set(`edge:${edgeId}`, altsOf[li]);
       edgeCount++;
     });
 
     // 既存の線の近くに書いた文字 → ラベル
     result.texts.forEach((t, i) => {
-      if (t.target.type === 'edge' && textOf[i]) tx.put('edge', { id: t.target.id, label: textOf[i] });
+      if (t.target.type === 'edge' && textOf[i]) {
+        tx.put('edge', { id: t.target.id, label: textOf[i] });
+        textCandidates.set(`edge:${t.target.id}`, altsOf[i]);
+      }
     });
 
     // どこにも属さない文字 → テキストノード
@@ -580,6 +610,7 @@ async function runOCR(mode = 'all') {
       if (t.target.type !== 'free' || !textOf[i]) return;
       const base = { id: uid(), shape: 'text', color: 'default', text: textOf[i], ...tidyBox('text', t.bbox) };
       tx.put('node', { ...base, ...canvas.fitSize(base, base.text), z: ++z });
+      textCandidates.set(`node:${base.id}`, altsOf[i]);
       textCount++;
     });
 
@@ -597,6 +628,7 @@ async function runOCR(mode = 'all') {
     canvas.setInk(after);
     pushHistory({ doc: committed, ink: { type: 'replace', before: strokes, after } });
     if (shapeNodes.length) canvas.select(shapeNodes.map((n) => n.id));
+    else canvas.select();
 
     const recognizedTexts = result.texts.length - failed.length;
     const keptNote = mode === 'shapes' && after.length ? ' ／ 文字は手書きのまま残しています' : mode === 'text' && after.length ? ' ／ 図形は手書きのまま残しています' : '';
@@ -609,7 +641,9 @@ async function runOCR(mode = 'all') {
       if (shapeNodes.length) parts.push(`図形 ${shapeNodes.length}`);
       if (edgeCount) parts.push(`線 ${edgeCount}`);
       if (recognizedTexts) parts.push(`文字 ${recognizedTexts}`);
-      toast(`整形しました（${parts.join('・') || '変更'}）${failed.length ? ' ／ 読めなかった文字は残しています' : keptNote}`, { duration: 3500 });
+      const scope = onlySelected ? '選んだ範囲を' : '';
+      const fixNote = recognizedTexts ? ' ／ 文字が違うときは、選んで「直す」' : '';
+      toast(`${scope}整形しました（${parts.join('・') || '変更'}）${failed.length ? ' ／ 読めなかった文字は残しています' : keptNote || fixNote}`, { duration: 4500 });
     }
   } catch (err) {
     console.error(err);
@@ -632,17 +666,38 @@ const SHAPE_BUTTONS = [
 
 function renderSelbar({ nodes, edges }) {
   const bar = $('selbar');
-  if (!nodes.length && !edges.length) {
+  const inkCount = canvas.selInk.size;
+  if (!nodes.length && !edges.length && !inkCount) {
     bar.hidden = true;
     bar.replaceChildren();
     return;
   }
   bar.hidden = false;
   const items = [];
+  const textBtn = (label, title, onclick, cls = '') => el('button', { class: `btn small ${cls}`, title, onclick }, label);
+  // 選んだ範囲の手書きを整形
+  if (inkCount) {
+    items.push(el('span', { class: 'sel-label' }, `手書き ${inkCount}`));
+    items.push(textBtn('整形', '選んだ範囲の手書きをすべて整形', () => runOCR('all'), 'primary'));
+    items.push(textBtn('図形だけ', '選んだ範囲の図形と線だけ整形', () => runOCR('shapes')));
+    items.push(textBtn('文字だけ', '選んだ範囲の文字だけ整形', () => runOCR('text')));
+  }
   if (nodes.length) {
+    if (items.length) items.push(el('span', { class: 'divider' }));
     const ns = nodes.map((id) => doc.node(id)).filter(Boolean);
     const shape = ns.every((n) => n.shape === ns[0]?.shape) ? ns[0]?.shape : null;
     const color = ns.every((n) => n.color === ns[0]?.color) ? ns[0]?.color : null;
+    if (nodes.length === 1) {
+      items.push(textBtn('直す', '文字を直す（候補から選ぶ・キーボード・手書き）', (e) => openFixMenu(e.currentTarget, 'node', nodes[0])));
+    }
+    items.push(
+      textBtn(
+        nodes.length > 1 ? '大きさをそろえる' : '文字に合わせる',
+        nodes.length > 1 ? 'いちばん長い文字が入る大きさに、すべてそろえる' : '文字がちょうど入る大きさにする',
+        () => unifySizesOf(nodes),
+      ),
+    );
+    items.push(el('span', { class: 'divider' }));
     for (const [s, title, d] of SHAPE_BUTTONS) {
       items.push(
         el('button', { class: `icon-btn${shape === s ? ' active' : ''}`, title, 'aria-label': title, onclick: () => updateNodes(nodes, { shape: s }) }, icon(d)),
@@ -654,27 +709,116 @@ function renderSelbar({ nodes, edges }) {
     }
     items.push(el('span', { class: 'divider' }));
     if (nodes.length === 1) {
-      items.push(el('button', { class: 'icon-btn', title: '文字を編集（Enter）', 'aria-label': '文字を編集', onclick: () => canvas.startEdit('node', nodes[0]) }, icon('M4 20h4L19 9l-4-4L4 16z')));
       items.push(el('button', { class: 'icon-btn', title: '下に次のノードを追加（Tab）', 'aria-label': '下に次のノードを追加', onclick: () => canvas.addConnected(nodes[0], 'bottom') }, icon('M12 4v12M7 11l5 5 5-5M6 20h12')));
     }
     items.push(el('button', { class: 'icon-btn', title: '複製（Ctrl+D）', 'aria-label': '複製', onclick: () => canvas.duplicateSelection() }, icon('M8 8h12v12H8zM4 16V4h12')));
   }
   if (edges.length) {
-    if (nodes.length) items.push(el('span', { class: 'divider' }));
+    if (items.length) items.push(el('span', { class: 'divider' }));
     const es = edges.map((id) => doc.edge(id)).filter(Boolean);
     const style = es.every((e) => e.style === es[0]?.style) ? es[0]?.style : null;
     const arrow = es.every((e) => e.arrow);
+    if (edges.length === 1) {
+      items.push(textBtn('ラベルを直す', 'ラベルを直す（候補から選ぶ・キーボード・手書き）', (e) => openFixMenu(e.currentTarget, 'edge', edges[0])));
+    }
     items.push(el('button', { class: `icon-btn${style === 'orthogonal' ? ' active' : ''}`, title: 'カギ線', 'aria-label': 'カギ線', onclick: () => updateEdges(edges, { style: 'orthogonal' }) }, icon('M4 18h7V6h9')));
     items.push(el('button', { class: `icon-btn${style === 'straight' ? ' active' : ''}`, title: '直線', 'aria-label': '直線', onclick: () => updateEdges(edges, { style: 'straight' }) }, icon('M4 20L20 4')));
     items.push(el('button', { class: `icon-btn${arrow ? ' active' : ''}`, title: '矢印の表示', 'aria-label': '矢印の表示', onclick: () => updateEdges(edges, { arrow: !arrow }) }, icon('M4 12h15M14 7l5 5-5 5')));
     items.push(el('button', { class: 'icon-btn', title: '向きを反対にする', 'aria-label': '向きを反対にする', onclick: () => reverseEdges(edges) }, icon('M7 7h13M16 3l4 4-4 4M17 17H4M8 13l-4 4 4 4')));
-    if (edges.length === 1) {
-      items.push(el('button', { class: 'icon-btn', title: 'ラベルを編集', 'aria-label': 'ラベルを編集', onclick: () => canvas.startEdit('edge', edges[0]) }, icon('M4 20h4L19 9l-4-4L4 16z')));
-    }
   }
   items.push(el('span', { class: 'divider' }));
   items.push(el('button', { class: 'icon-btn btn danger', title: '削除（Delete）', 'aria-label': '削除', onclick: () => canvas.deleteSelection() }, icon('M5 7h14M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3')));
   bar.replaceChildren(...items);
+}
+
+// ---------- 大きさをそろえる ----------
+/**
+ * 選んだノードを、いちばん長い文字が入る大きさにそろえる。
+ * 幅は「最も長い文字が1行に入る幅」、高さはその幅で全部の文字が入る高さ。中心の位置は変えない。
+ */
+function unifySizesOf(ids) {
+  const ns = ids.map((id) => doc.node(id)).filter(Boolean);
+  // 複数のときは、枠のないテキストは対象外
+  const targets = ns.length > 1 ? ns.filter((n) => n.shape !== 'text') : ns;
+  if (!targets.length) return;
+  const W = Math.max(...targets.map((n) => canvas.requiredSize(n.shape, n.text).w));
+  const H = Math.max(...targets.map((n) => canvas.requiredSize(n.shape, n.text, W).h));
+  const tx = doc.tx();
+  for (const n of targets) {
+    const cx = n.x + n.w / 2;
+    const cy = n.y + n.h / 2;
+    tx.put('node', { id: n.id, w: W, h: H, x: snap(cx - W / 2), y: snap(cy - H / 2) });
+  }
+  tx.commit();
+  toast(targets.length > 1 ? `${targets.length} 個を ${W}×${H} にそろえました` : `${W}×${H} にしました`);
+}
+
+// ---------- 文字を直す ----------
+/** 整形で読み取った文字の候補（ノード・線ごと）。この端末で開いている間だけ覚えておく */
+const textCandidates = new Map();
+
+function openFixMenu(anchor, k, id) {
+  const item = doc.get(k, id);
+  if (!item) return;
+  const current = (k === 'node' ? item.text : item.label) || '';
+  const cands = (textCandidates.get(`${k}:${id}`) || []).filter((c) => c && c !== current);
+  const setText = (text) => {
+    if (k === 'node') doc.tx().put('node', { id, text, ...canvas.fitSize(item, text) }).commit();
+    else doc.tx().put('edge', { id, label: text }).commit();
+  };
+  const entries = [];
+  if (cands.length) {
+    entries.push({ head: '読み取りの候補' });
+    for (const c of cands.slice(0, 6)) entries.push({ label: c, onClick: () => setText(c), cand: true });
+  }
+  entries.push({ label: 'キーボードで入力', sub: '文字を打ち直す', onClick: () => canvas.startEdit(k, id) });
+  entries.push({
+    label: '手書きで書き直す',
+    sub: k === 'node' ? '文字を消して、ノードの中に書き直す' : 'ラベルを消して、線の近くに書き直す',
+    onClick: () => {
+      setText('');
+      setTool('text');
+      toast(k === 'node' ? 'ノードの中に書いて「整形」を押してください' : '線の近くに書いて「整形」を押してください', { duration: 4000 });
+    },
+  });
+  openMenu(anchor, entries);
+}
+
+/** 小さなメニューを、ボタンの近くに出す */
+function openMenu(anchor, entries) {
+  hideToast();
+  const menu = $('popMenu');
+  menu.replaceChildren(
+    ...entries.map((en) =>
+      en.head
+        ? el('div', { class: 'menu-head' }, en.head)
+        : el(
+            'button',
+            {
+              class: en.cand ? 'cand' : '',
+              role: 'menuitem',
+              onclick: () => {
+                closeMenus();
+                en.onClick();
+              },
+            },
+            el('b', {}, en.label),
+            en.sub ? el('small', {}, en.sub) : null,
+          ),
+    ),
+  );
+  menu.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  const mh = menu.offsetHeight;
+  const mw = menu.offsetWidth;
+  const top = r.top - mh - 8 > 8 ? r.top - mh - 8 : r.bottom + 8;
+  menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - mw - 8))}px`;
+  menu.style.top = `${top}px`;
+}
+
+function closeMenus() {
+  $('popMenu').hidden = true;
+  closeOcrMenu();
 }
 
 function colorName(c) {
@@ -762,7 +906,7 @@ function toggleSidebar(open) {
 }
 
 const TOOL_INFO = {
-  select: { name: '選択', hint: 'ノードを動かす・つなぐ・編集する。ペンでなぞると範囲選択、指でドラッグすると画面の移動' },
+  select: { name: '選択', hint: 'ノードを動かす・つなぐ・編集する。ペンで囲むと範囲選択（囲んだ手書きだけ整形、ノードの大きさをそろえる）、指でドラッグすると画面の移動' },
   text: { name: '文字ペン', hint: '文字を書く（黒）。ノードの中に書くとそのノードの文字、線の近くに書くと線のラベルになります' },
   shape: { name: '図形ペン', hint: '四角・角丸・ひし形・丸・平行四辺形の枠と、つなぐ線を書く（青）' },
   eraser: { name: '消しゴム', hint: 'なぞった手書き・ノード・線を消します（最初に触れたものの種類だけ消えます）' },
@@ -865,7 +1009,7 @@ function bindUI() {
     if (mode) runOCR(mode);
   });
   document.addEventListener('pointerdown', (e) => {
-    if (!e.target.closest('#ocrMenu, #ocrMenuBtn')) closeOcrMenu();
+    if (!e.target.closest('#ocrMenu, #ocrMenuBtn, #popMenu, #selbar')) closeMenus();
   });
   $('clearInk').addEventListener('click', () => canvas.clearInk());
   $('addNode').addEventListener('click', () => {
@@ -939,7 +1083,10 @@ function bindUI() {
     else if (key === 'r' && canvas.ink.length) runOCR(e.shiftKey ? 'shapes' : 'all');
   });
 
-  canvas.addEventListener('selection', (e) => renderSelbar(e.detail));
+  canvas.addEventListener('selection', (e) => {
+    $('popMenu').hidden = true;
+    renderSelbar(e.detail);
+  });
   canvas.addEventListener('view', () => {
     $('zoomLabel').textContent = `${Math.round(canvas.view.k * 100)}%`;
     saveViewSoon();

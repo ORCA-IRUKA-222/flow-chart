@@ -1,6 +1,6 @@
 // オフラインでもアプリを開けるようにするサービスワーカー（https または localhost のときだけ動く）
 // アプリを更新したら、js/app.js の APP_VERSION と一緒に変える
-const CACHE = 'flowchart-2026.11.27-1';
+const CACHE = 'flowchart-2026.11.27-2';
 // sw.js からの相対パス（PC のサーバーでも GitHub Pages のサブフォルダでも動くように）
 const SHELL = [
   './',
