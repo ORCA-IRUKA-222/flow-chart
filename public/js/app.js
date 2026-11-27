@@ -5,6 +5,7 @@ import { Doc } from './doc.js';
 import { recognizeLines } from './handwriting.js';
 import { idbDel, idbGet, idbSet } from './idb.js';
 import { alignNodes, analyzeInk, splitLines, tidyBox, unifySizes } from './recognize.js';
+import { chooseCandidate, wordsOf } from './textfix.js';
 import { Sync } from './sync.js';
 import { GitHubSync, checkRepo, markForUpload } from './github-sync.js';
 import {
@@ -25,7 +26,7 @@ import { debounce, el, hideToast, toast, uid } from './util.js';
 const $ = (id) => document.getElementById(id);
 
 // アプリを更新したら、sw.js の CACHE と一緒に変える
-export const APP_VERSION = '2026.11.27-3';
+export const APP_VERSION = '2026.11.27-4';
 
 const clientId = (() => {
   let id = localStorage.getItem('fc:client');
@@ -517,13 +518,22 @@ async function runOCR(mode = 'all') {
       hideToast();
     }
     if (doc.id !== boardId) return;
+    // 行ごとに、見た目のそっくりな字を直し、よく使う言葉・前に直した内容に合う候補を選ぶ
+    const vocab = buildVocab();
+    const corrections = loadCorrections();
+    const lineChoice = lines.map((_, li) => {
+      const cands = recog.candidates?.[li]?.length ? recog.candidates[li] : [recog.results[li]];
+      return chooseCandidate(cands, { vocab, corrections });
+    });
     const textOf = result.texts.map((_, i) => {
       const [start, count] = spans[i];
-      return recog.results
+      const text = lineChoice
         .slice(start, start + count)
+        .map((c) => c.text)
         .filter(Boolean)
         .join('\n')
         .trim();
+      return corrections[text] || text;
     });
 
     // 間違えたときに選び直せるよう、候補の組み合わせも作っておく（行ごとに j 番目の候補をつなげる）
@@ -531,12 +541,13 @@ async function runOCR(mode = 'all') {
       const [start, count] = spans[i];
       const out = [];
       for (let j = 0; j < 6; j++) {
-        const text = Array.from({ length: count }, (_, l) => (recog.candidates?.[start + l] || [])[j] ?? recog.results[start + l])
+        const text = Array.from({ length: count }, (_, l) => lineChoice[start + l].candidates[j] ?? lineChoice[start + l].text)
           .filter(Boolean)
           .join('\n')
           .trim();
         if (text && !out.includes(text)) out.push(text);
       }
+      if (textOf[i] && !out.includes(textOf[i])) out.unshift(textOf[i]);
       return out;
     });
 
@@ -566,7 +577,7 @@ async function runOCR(mode = 'all') {
     ).map((n) => ({ ...n, x: snap(n.x, 5), y: snap(n.y, 5), z: ++z }));
     shapeNodes.forEach((n) => tx.put('node', n));
     result.texts.forEach((t, i) => {
-      if (t.target.type === 'shape' && textOf[i]) textCandidates.set(`node:${shapeNodes[t.target.index].id}`, altsOf[i]);
+      if (t.target.type === 'shape' && textOf[i]) rememberOcr(`node:${shapeNodes[t.target.index].id}`, altsOf[i], textOf[i]);
     });
 
     // 既存ノードの中に書いた文字 → 文字を追加
@@ -576,7 +587,7 @@ async function runOCR(mode = 'all') {
       const prefix = n.text ? `${n.text}\n` : '';
       const text = prefix + textOf[i];
       tx.put('node', { id: n.id, text, ...canvas.fitSize(n, text) });
-      textCandidates.set(`node:${n.id}`, altsOf[i].map((a) => prefix + a));
+      rememberOcr(`node:${n.id}`, altsOf[i].map((a) => prefix + a), text);
     });
 
     // 矢印 → 線
@@ -599,7 +610,7 @@ async function runOCR(mode = 'all') {
       const edgeId = uid();
       tx.put('edge', { id: edgeId, from, to, label, style: 'orthogonal', arrow: true });
       const li = result.texts.findIndex((t) => t.target.type === 'connector' && t.target.index === index);
-      if (li >= 0 && textOf[li]) textCandidates.set(`edge:${edgeId}`, altsOf[li]);
+      if (li >= 0 && textOf[li]) rememberOcr(`edge:${edgeId}`, altsOf[li], label);
       edgeCount++;
     });
 
@@ -607,7 +618,7 @@ async function runOCR(mode = 'all') {
     result.texts.forEach((t, i) => {
       if (t.target.type === 'edge' && textOf[i]) {
         tx.put('edge', { id: t.target.id, label: textOf[i] });
-        textCandidates.set(`edge:${t.target.id}`, altsOf[i]);
+        rememberOcr(`edge:${t.target.id}`, altsOf[i], textOf[i]);
       }
     });
 
@@ -617,9 +628,12 @@ async function runOCR(mode = 'all') {
       if (t.target.type !== 'free' || !textOf[i]) return;
       const base = { id: uid(), shape: 'text', color: 'default', text: textOf[i], ...tidyBox('text', t.bbox) };
       tx.put('node', { ...base, ...canvas.fitSize(base, base.text), z: ++z });
-      textCandidates.set(`node:${base.id}`, altsOf[i]);
+      rememberOcr(`node:${base.id}`, altsOf[i], textOf[i]);
       textCount++;
     });
+
+    // このボードで使っている言葉を覚えておく（次の整形で候補選びに使う）
+    for (const n of existing) if (n.text) learnWords(n.text);
 
     // 整形は「図の変更」と「手書きが消えたこと」を1回の操作として元に戻せるようにする
     let committed = false;
@@ -763,6 +777,72 @@ function unifySizesOf(ids) {
 // ---------- 文字を直す ----------
 /** 整形で読み取った文字の候補（ノード・線ごと）。この端末で開いている間だけ覚えておく */
 const textCandidates = new Map();
+/** 整形で読み取ったときの文字（直したかどうかを知るため） */
+const ocrTexts = new Map();
+
+function rememberOcr(key, candidates, text) {
+  textCandidates.set(key, candidates);
+  ocrTexts.set(key, text);
+}
+
+// ---------- 読み間違いの学習 ----------
+// 直した内容（読み取り結果 → 正しい文字）と、よく使う言葉を端末に覚えておき、次の整形で使う
+function loadCorrections() {
+  try {
+    return JSON.parse(localStorage.getItem('fc:corrections')) || {};
+  } catch {
+    return {};
+  }
+}
+
+function learnCorrection(wrong, right) {
+  if (!wrong || !right || wrong === right || right.length > wrong.length * 3 + 5) return;
+  const c = loadCorrections();
+  delete c[wrong];
+  c[wrong] = right;
+  const keys = Object.keys(c);
+  for (const k of keys.slice(0, Math.max(0, keys.length - 300))) delete c[k];
+  localStorage.setItem('fc:corrections', JSON.stringify(c));
+  learnWords(right);
+}
+
+function learnWords(text) {
+  let words = [];
+  try {
+    words = JSON.parse(localStorage.getItem('fc:vocab')) || [];
+  } catch {
+    words = [];
+  }
+  const set = new Set(words);
+  for (const w of wordsOf(text)) {
+    set.delete(w);
+    set.add(w);
+  }
+  localStorage.setItem('fc:vocab', JSON.stringify([...set].slice(-3000)));
+}
+
+/** よく使う言葉: 覚えている言葉 + 開いているボードの文字 */
+function buildVocab() {
+  let words = [];
+  try {
+    words = JSON.parse(localStorage.getItem('fc:vocab')) || [];
+  } catch {
+    words = [];
+  }
+  const set = new Set(words);
+  for (const n of doc.nodes()) for (const w of wordsOf(n.text)) set.add(w);
+  for (const e of doc.edges()) for (const w of wordsOf(e.label)) set.add(w);
+  return set;
+}
+
+/** 整形した文字を直したら、その読み間違いを覚える */
+function onTextFixed(k, id, after) {
+  const key = `${k}:${id}`;
+  const before = ocrTexts.get(key);
+  if (before === undefined) return;
+  ocrTexts.delete(key);
+  if (after) learnCorrection(before, after);
+}
 
 function openFixMenu(anchor, k, id) {
   const item = doc.get(k, id);
@@ -772,6 +852,7 @@ function openFixMenu(anchor, k, id) {
   const setText = (text) => {
     if (k === 'node') doc.tx().put('node', { id, text, ...canvas.fitSize(item, text) }).commit();
     else doc.tx().put('edge', { id, label: text }).commit();
+    if (text) onTextFixed(k, id, text);
   };
   const entries = [];
   if (cands.length) {
@@ -1117,6 +1198,7 @@ function bindUI() {
   });
   canvas.addEventListener('tool', onToolChanged);
   canvas.addEventListener('ink-history', (e) => pushHistory({ ink: e.detail }));
+  canvas.addEventListener('text-edited', (e) => onTextFixed(e.detail.k, e.detail.id, e.detail.after));
   // 消しゴムで消した手書きとノード・線は、1回の操作として元に戻す
   canvas.addEventListener('erase-history', (e) => {
     const { items, docChanges } = e.detail;

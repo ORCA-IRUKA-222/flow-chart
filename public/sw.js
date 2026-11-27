@@ -1,6 +1,6 @@
 // オフラインでもアプリを開けるようにするサービスワーカー（https または localhost のときだけ動く）
 // アプリを更新したら、js/app.js の APP_VERSION と一緒に変える
-const CACHE = 'flowchart-2026.11.27-3';
+const CACHE = 'flowchart-2026.11.27-4';
 // sw.js からの相対パス（PC のサーバーでも GitHub Pages のサブフォルダでも動くように）
 const SHELL = [
   './',
@@ -18,6 +18,7 @@ const SHELL = [
   'js/idb.js',
   'js/recognize.js',
   'js/sync.js',
+  'js/textfix.js',
   'js/util.js',
   'shared/ops.js',
 ].map((p) => new URL(p, self.registration.scope).href);

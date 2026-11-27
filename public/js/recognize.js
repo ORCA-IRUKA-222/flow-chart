@@ -232,8 +232,12 @@ export function analyzeInk(strokes, { nodes = [], edges = [] } = {}) {
     }
   }
 
-  // 近くにある線どうしを1つの文字列としてまとめる
-  const gapTol = 28 * S;
+  // 近くにある線どうしを1つの文字列としてまとめる。
+  // 間隔の許容量は、書いた文字の大きさに合わせる（大きく書く人ほど字間も広い）
+  const sizes = free.map((si) => si.maxDim).sort((a, b) => a - b);
+  const charSize = sizes.length ? sizes[Math.floor(sizes.length * 0.75)] : 0;
+  const gapTol = Math.max(28 * S, charSize * 0.9);
+  const gapTolY = Math.max(gapTol * 0.7, charSize * 0.9);
   const uf = new UnionFind(free.length);
   for (let a = 0; a < free.length; a++) {
     for (let b = a + 1; b < free.length; b++) {
@@ -241,7 +245,7 @@ export function analyzeInk(strokes, { nodes = [], edges = [] } = {}) {
       const B = free[b].bbox;
       const gx = Math.max(0, Math.max(A.x, B.x) - Math.min(A.x + A.w, B.x + B.w));
       const gy = Math.max(0, Math.max(A.y, B.y) - Math.min(A.y + A.h, B.y + B.h));
-      if (gx <= gapTol && gy <= gapTol * 0.7) uf.union(a, b);
+      if (gx <= gapTol && gy <= gapTolY) uf.union(a, b);
     }
   }
   const clusters = new Map();
@@ -250,6 +254,39 @@ export function analyzeInk(strokes, { nodes = [], edges = [] } = {}) {
     if (!clusters.has(r)) clusters.set(r, []);
     clusters.get(r).push(si);
   });
+
+  // 図形の枠から少しはみ出して書いた文字が、別のテキストに分かれないようにする:
+  //  - まとまりの中心が図形・ノードの中なら、その中の文字
+  //  - 図形の中の文字のすぐ隣に続けて書いたものも、その中の文字
+  const gap = (A, B) =>
+    Math.max(
+      Math.max(0, Math.max(A.x, B.x) - Math.min(A.x + A.w, B.x + B.w)),
+      Math.max(0, Math.max(A.y, B.y) - Math.min(A.y + A.h, B.y + B.h)) * 1.4,
+    );
+  for (const [key, members] of [...clusters.entries()]) {
+    const box = bboxOf(members.flatMap((m) => m.points));
+    const c = { x: box.x + box.w / 2, y: box.y + box.h / 2 };
+    let into = null;
+    const t = innermostTarget(c, 6 * S);
+    if (t) {
+      const k = t.ref.type === 'node' ? `n:${t.ref.id}` : `s:${t.ref.index}`;
+      if (!inTarget.has(k)) inTarget.set(k, { target: t.ref, strokes: [] });
+      into = inTarget.get(k);
+    } else {
+      for (const g of inTarget.values()) {
+        const gb = bboxOf(g.strokes.flatMap((m) => m.points));
+        if (gap(box, gb) <= gapTol) {
+          into = g;
+          break;
+        }
+      }
+    }
+    if (into) {
+      into.strokes.push(...members);
+      members.forEach((m) => used.add(m.i));
+      clusters.delete(key);
+    }
+  }
 
   const texts = [...inTarget.values()].map((g) => ({
     target: g.target,
@@ -281,25 +318,78 @@ export function analyzeInk(strokes, { nodes = [], edges = [] } = {}) {
   return { shapes, connectors, texts, leftover, scale: S };
 }
 
-/** 文字の線を行ごとに分ける（縦方向の隙間で区切る） */
+/**
+ * 文字の線を行ごとに分ける。
+ *  1) 全体の高さが文字2行分に満たなければ1行
+ *  2) 行と行の間に、少しでも何も書いていない高さがあればそこで分ける
+ *  3) 行が少し重なっていて隙間がなければ、手書きがいちばん薄い高さで分ける
+ *  4) 点や濁点だけの小さな「行」は、近い行に戻す
+ * 各行の線は書いた順に並べる（書き順は認識の大事な手がかり）。
+ */
 export function splitLines(strokes) {
   if (strokes.length <= 1) return [strokes];
-  const items = strokes.map((pts) => ({ pts, box: bboxOf(pts) }));
+  const items = strokes.map((pts, order) => ({ pts, order, box: bboxOf(pts) }));
+  const byWriting = (a, b) => (a.pts[0].t || 0) - (b.pts[0].t || 0) || a.order - b.order;
+  const one = () => [[...items].sort(byWriting).map((it) => it.pts)];
+  const all = bboxOf(strokes.flat());
+  // 文字の高さの目安。「二」「ー」のような横長の線だけの字でも小さくなりすぎないよう、線の幅も使う
   const heights = items.map((it) => it.box.h).sort((a, b) => a - b);
-  const charH = Math.max(heights[Math.floor(heights.length * 0.9)] || 1, 1);
-  items.sort((a, b) => a.box.y - b.box.y);
-  const lines = [];
-  let cur = null;
-  for (const it of items) {
-    if (cur && it.box.y <= cur.bottom + charH * 0.5) {
-      cur.items.push(it);
-      cur.bottom = Math.max(cur.bottom, it.box.y + it.box.h);
-    } else {
-      cur = { items: [it], bottom: it.box.y + it.box.h };
-      lines.push(cur);
+  const widths = items.map((it) => it.box.w).sort((a, b) => a - b);
+  const charH = Math.max(heights[Math.floor(heights.length * 0.75)] || 1, (widths[Math.floor(widths.length / 2)] || 1) * 0.6, 1);
+  if (all.h < charH * 1.8) return one();
+
+  // 2) 何も書いていない高さ（線の上下の範囲が重ならない所）で区切る
+  const ivs = items.map((it) => [it.box.y, it.box.y + it.box.h]).sort((a, b) => a[0] - b[0]);
+  const cuts = [];
+  let bottom = ivs[0][1];
+  for (const [top, bot] of ivs.slice(1)) {
+    if (top > bottom + charH * 0.04) cuts.push((bottom + top) / 2);
+    bottom = Math.max(bottom, bot);
+  }
+  // 3) 隙間がなければ、手書きの点がいちばん少ない高さで区切る
+  if (!cuts.length) {
+    const bin = Math.max(charH / 6, 1e-6);
+    const n = Math.ceil(all.h / bin) + 1;
+    const hist = new Array(n).fill(0);
+    for (const it of items) for (const p of it.pts) hist[Math.floor((p.y - all.y) / bin)]++;
+    const from = Math.ceil((charH * 0.6) / bin);
+    const to = n - 1 - from;
+    let best = -1;
+    for (let i = from; i <= to; i++) if (best < 0 || hist[i] < hist[best]) best = i;
+    if (best >= 0) {
+      // 上下それぞれの行のいちばん濃い所と比べて、はっきり薄ければ行の切れ目
+      const above = Math.max(...hist.slice(0, best));
+      const below = Math.max(...hist.slice(best + 1));
+      const cut = all.y + (best + 0.5) * bin;
+      // 行の切れ目なら、またぐ線はほとんどない（文字の途中で切ると、縦の線が多くまたぐ）
+      const crossing = items.filter((it) => it.box.y < cut - charH * 0.15 && it.box.y + it.box.h > cut + charH * 0.15).length;
+      if (hist[best] <= Math.min(above, below) * 0.4 && crossing <= items.length * 0.2) cuts.push(cut);
     }
   }
-  return lines.map((l) => l.items.sort((a, b) => a.box.x - b.box.x).map((it) => it.pts));
+  if (!cuts.length) return one();
+
+  // 区切りごとに、線を（中心の高さで）振り分ける
+  const bands = Array.from({ length: cuts.length + 1 }, () => ({ items: [], top: Infinity, bottom: -Infinity }));
+  for (const it of items) {
+    const cy = it.box.y + it.box.h / 2;
+    let k = 0;
+    while (k < cuts.length && cy > cuts[k]) k++;
+    const b = bands[k];
+    b.items.push(it);
+    b.top = Math.min(b.top, it.box.y);
+    b.bottom = Math.max(b.bottom, it.box.y + it.box.h);
+  }
+  const used = bands.filter((b) => b.items.length);
+  // 4) 小さな「行」（点・濁点・「二」の横線だけなど）は近い行に戻す
+  const real = used.filter((b) => b.bottom - b.top >= charH * 0.5 || b.items.length >= 3);
+  if (real.length <= 1) return one();
+  for (const b of used) {
+    if (real.includes(b)) continue;
+    const mid = (b.top + b.bottom) / 2;
+    const near = real.reduce((x, r) => (Math.abs((r.top + r.bottom) / 2 - mid) < Math.abs((x.top + x.bottom) / 2 - mid) ? r : x));
+    near.items.push(...b.items);
+  }
+  return real.map((b) => b.items.sort(byWriting).map((it) => it.pts));
 }
 
 const MIN_SIZE = {

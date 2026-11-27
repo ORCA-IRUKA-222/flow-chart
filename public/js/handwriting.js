@@ -37,16 +37,26 @@ async function recognizeNative(rec, line) {
   return (preds || []).map((p) => p.text?.trim()).filter(Boolean);
 }
 
-/** 1行分の線を Google 形式の ink に変換（左上を原点、表示倍率をかけて画面相当の大きさに） */
+/**
+ * 1行分の線を Google 形式の ink に変換する。
+ * 小さく書いた字・大きく書いた字でも認識が安定するよう、行の高さが一般的な手書き入力欄と
+ * 同じくらい（50〜160px）になるように拡大・縮小し、周りに余白を付ける。
+ */
 export function toInk(line, k = 1) {
   const box = bboxOf(line.flat());
+  // 「一」のような平たい行でも極端に拡大しないよう、幅も目安に使う
+  const ref = Math.max(box.h, box.w * 0.25, 1e-6);
+  let scale = k;
+  if (ref * scale < 50) scale = 50 / ref;
+  if (ref * scale > 160) scale = 160 / ref;
+  const pad = Math.round(Math.max(20, ref * scale * 0.3));
   const t0 = Math.min(...line.map((s) => s[0].t || 0));
   return {
-    w: Math.ceil(box.w * k) + 20,
-    h: Math.ceil(box.h * k) + 20,
+    w: Math.ceil(box.w * scale) + pad * 2,
+    h: Math.ceil(box.h * scale) + pad * 2,
     ink: line.map((pts) => [
-      pts.map((p) => Math.round((p.x - box.x) * k + 10)),
-      pts.map((p) => Math.round((p.y - box.y) * k + 10)),
+      pts.map((p) => Math.round((p.x - box.x) * scale + pad)),
+      pts.map((p) => Math.round((p.y - box.y) * scale + pad)),
       pts.map((p) => Math.round((p.t || 0) - t0)),
     ]),
   };

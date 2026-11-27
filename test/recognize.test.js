@@ -157,3 +157,17 @@ test('ペンの種類: 文字ペンの線は図形や矢印にならず、図形
   r = analyzeInk([G(rectStroke(20, 20, 120, 60))], { nodes: [{ id: 'big', x: 0, y: 0, w: 600, h: 400 }] });
   assert.equal(r.shapes.length, 1);
 });
+
+test('文字のまとまり: 枠からはみ出した字や、字間の広い字を分けない', () => {
+  const T = (points) => ({ points, k: 1, kind: 'text' });
+  const G = (points) => ({ points, k: 1, kind: 'shape' });
+  // 四角の中に書き始め、最後の字が枠の外にはみ出した
+  // 字の大きさ 22・字間 6 で、最後の字の中心が枠の外（x=215）
+  let r = analyzeInk([G(rectStroke(0, 0, 200, 80)), ...[120, 148, 176, 204].flatMap((x) => scribble(x, 30, 22)).map(T)]);
+  assert.equal(r.texts.length, 1);
+  assert.deepEqual(r.texts[0].target, { type: 'shape', index: 0 });
+  assert.equal(r.texts[0].strokes.length, 12);
+  // 大きめの字を、字間を空けて書いた（字の大きさ 40、間隔 34）
+  r = analyzeInk([...scribble(0, 0, 40).map(T), ...scribble(74, 0, 40).map(T), ...scribble(148, 0, 40).map(T)]);
+  assert.equal(r.texts.length, 1);
+});

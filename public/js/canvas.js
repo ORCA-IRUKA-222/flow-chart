@@ -486,8 +486,10 @@ export class Canvas extends EventTarget {
       if (item) {
         if (k === 'node' && text !== item.text) {
           this.doc.tx().put('node', { id, text, ...this.fitSize(item, text) }).commit();
+          this.emit('text-edited', { k, id, before: item.text, after: text });
         } else if (k === 'edge' && text !== item.label) {
           this.doc.tx().put('edge', { id, label: text }).commit();
+          this.emit('text-edited', { k, id, before: item.label, after: text });
         }
       }
     }
@@ -663,7 +665,7 @@ export class Canvas extends EventTarget {
         for (const ev of events.length ? events : [e]) {
           const q = this.toWorld(this.screenPoint(ev));
           const last = a.stroke.points[a.stroke.points.length - 1];
-          if (dist(last, q) * this.view.k >= 1) a.stroke.points.push({ x: q.x, y: q.y, t: performance.now() - a.t0 });
+          if (dist(last, q) * this.view.k >= 1) a.stroke.points.push({ x: q.x, y: q.y, t: ev.timeStamp || performance.now() });
         }
         this.updateLiveStroke(a.stroke);
         break;
@@ -958,7 +960,8 @@ export class Canvas extends EventTarget {
   }
 
   startInk(e, w, kind) {
-    const stroke = { points: [{ x: w.x, y: w.y, t: 0 }], k: this.view.k, width: (kind === 'text' ? 2.2 : 2.6) / this.view.k, kind };
+    // t は書いた時刻（ミリ秒）。線の順番と間隔は文字認識の手がかりになる
+    const stroke = { points: [{ x: w.x, y: w.y, t: performance.now() }], k: this.view.k, width: (kind === 'text' ? 2.2 : 2.6) / this.view.k, kind };
     this.action = { type: 'ink', pid: e.pointerId, ptype: e.pointerType, stroke, t0: performance.now(), sx: 0, sy: 0, moved: true };
     this.liveStroke = svg('path', { class: `ink ink-${kind}`, 'stroke-width': stroke.width });
     this.inkG.append(this.liveStroke);
