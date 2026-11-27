@@ -25,7 +25,7 @@ import { debounce, el, hideToast, toast, uid } from './util.js';
 const $ = (id) => document.getElementById(id);
 
 // アプリを更新したら、sw.js の CACHE と一緒に変える
-export const APP_VERSION = '2026.11.26-5';
+export const APP_VERSION = '2026.11.27-1';
 
 const clientId = (() => {
   let id = localStorage.getItem('fc:client');
@@ -440,12 +440,25 @@ async function createSync() {
 // ---------- 手書き整形（OCR） ----------
 let ocrRunning = false;
 
-async function runOCR() {
+/**
+ * 手書きを整形する。
+ * @param mode 'all' = すべて / 'shapes' = 図形と線だけ（文字は手書きのまま） / 'text' = 文字だけ（図形は手書きのまま）
+ */
+async function runOCR(mode = 'all') {
   if (ocrRunning) return;
   canvas.finishEdit();
+  closeOcrMenu();
   const strokes = canvas.ink;
-  if (!strokes.length) {
-    toast('ペンで図形・矢印・文字を書いてから押してください');
+  // 対象にする手書き（文字ペン・図形ペンの区別で絞る。区別のない古い手書きはどちらにも含める）
+  const subset = strokes.map((s, i) => i).filter((i) => (mode === 'shapes' ? strokes[i].kind !== 'text' : mode === 'text' ? strokes[i].kind !== 'shape' : true));
+  if (!subset.length) {
+    toast(
+      mode === 'shapes'
+        ? '整形する図形の手書きがありません（図形ペンで描いてください）'
+        : mode === 'text'
+          ? '整形する文字の手書きがありません（文字ペンで書いてください）'
+          : 'ペンで図形・矢印・文字を書いてから押してください',
+    );
     return;
   }
   ocrRunning = true;
@@ -453,7 +466,28 @@ async function runOCR() {
   try {
     const boardId = doc.id;
     const existing = doc.nodes();
-    const result = analyzeInk(strokes, { nodes: existing, edges: canvas.edgeLines() });
+    const result = analyzeInk(
+      subset.map((i) => strokes[i]),
+      { nodes: existing, edges: canvas.edgeLines() },
+    );
+    // 今回は整形しないものは、手書きのまま残す
+    const skipped = new Set();
+    if (mode === 'shapes') {
+      result.texts.forEach((t) => t.idx.forEach((i) => skipped.add(i)));
+      result.texts = [];
+    } else if (mode === 'text') {
+      result.shapes.forEach((sh) => sh.idx.forEach((i) => skipped.add(i)));
+      result.connectors.forEach((c) => c.idx.forEach((i) => skipped.add(i)));
+      result.texts = result.texts.filter((t) => {
+        if (t.target.type === 'shape' || t.target.type === 'connector') {
+          t.idx.forEach((i) => skipped.add(i));
+          return false;
+        }
+        return true;
+      });
+      result.shapes = [];
+      result.connectors = [];
+    }
 
     // 文字の認識
     const lines = [];
@@ -480,7 +514,7 @@ async function runOCR() {
         .trim();
     });
 
-    const keepStrokes = new Set(result.leftover);
+    const keepStrokes = new Set([...result.leftover, ...skipped]);
     const failed = [];
     result.texts.forEach((t, i) => {
       if (!textOf[i]) {
@@ -556,12 +590,16 @@ async function runOCR() {
       committed = tx.commit().length > 0;
       suppressDocHistory = false;
     }
-    const after = strokes.filter((_, i) => keepStrokes.has(i));
+    // keepStrokes は絞り込んだ一覧の番号なので、元の番号に戻す。対象外だった手書きもそのまま残す
+    const keepOriginal = new Set(strokes.map((_, i) => i).filter((i) => !subset.includes(i)));
+    keepStrokes.forEach((i) => keepOriginal.add(subset[i]));
+    const after = strokes.filter((_, i) => keepOriginal.has(i));
     canvas.setInk(after);
     pushHistory({ doc: committed, ink: { type: 'replace', before: strokes, after } });
     if (shapeNodes.length) canvas.select(shapeNodes.map((n) => n.id));
 
     const recognizedTexts = result.texts.length - failed.length;
+    const keptNote = mode === 'shapes' && after.length ? ' ／ 文字は手書きのまま残しています' : mode === 'text' && after.length ? ' ／ 図形は手書きのまま残しています' : '';
     if (!tx.size && !recognizedTexts) {
       toast(lines.length && !recog.ok ? '文字認識サービスに接続できませんでした' : '図形として認識できませんでした。もう少し大きく、線を閉じて書いてみてください', { kind: 'error', duration: 4000 });
     } else if (lines.length && !recog.ok) {
@@ -571,7 +609,7 @@ async function runOCR() {
       if (shapeNodes.length) parts.push(`図形 ${shapeNodes.length}`);
       if (edgeCount) parts.push(`線 ${edgeCount}`);
       if (recognizedTexts) parts.push(`文字 ${recognizedTexts}`);
-      toast(`整形しました（${parts.join('・') || '変更'}）${failed.length ? ' ／ 読めなかった文字は残しています' : ''}`);
+      toast(`整形しました（${parts.join('・') || '変更'}）${failed.length ? ' ／ 読めなかった文字は残しています' : keptNote}`, { duration: 3500 });
     }
   } catch (err) {
     console.error(err);
@@ -812,7 +850,23 @@ function bindUI() {
     if (e.key === 'Enter') e.target.blur();
   });
   document.querySelectorAll('[data-tool]').forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
-  $('ocrBtn').addEventListener('click', runOCR);
+  $('ocrBtn').addEventListener('click', () => runOCR('all'));
+  $('ocrMenuBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const menu = $('ocrMenu');
+    if (!menu.hidden) return closeOcrMenu();
+    const r = $('ocrMenuBtn').getBoundingClientRect();
+    menu.style.left = `${Math.max(8, Math.min(r.right - 200, window.innerWidth - 208))}px`;
+    menu.style.top = `${r.bottom + 6}px`;
+    menu.hidden = false;
+  });
+  $('ocrMenu').addEventListener('click', (e) => {
+    const mode = e.target.closest('[data-ocr]')?.dataset.ocr;
+    if (mode) runOCR(mode);
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (!e.target.closest('#ocrMenu, #ocrMenuBtn')) closeOcrMenu();
+  });
   $('clearInk').addEventListener('click', () => canvas.clearInk());
   $('addNode').addEventListener('click', () => {
     const r = canvas.rect();
@@ -882,7 +936,7 @@ function bindUI() {
     else if (key === 'f') canvas.fit();
     else if (key === '+' || key === '=') canvas.zoomBy(1.25);
     else if (key === '-') canvas.zoomBy(0.8);
-    else if (key === 'r' && canvas.ink.length) runOCR();
+    else if (key === 'r' && canvas.ink.length) runOCR(e.shiftKey ? 'shapes' : 'all');
   });
 
   canvas.addEventListener('selection', (e) => renderSelbar(e.detail));
@@ -943,6 +997,10 @@ function bindUI() {
 }
 
 const saveViewSoon = debounce(saveView, 400);
+
+function closeOcrMenu() {
+  $('ocrMenu').hidden = true;
+}
 
 /** ペンのボタン確認: ブラウザに届いた pointer イベントの中身を表示する */
 function bindPenTest() {

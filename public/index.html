@@ -58,10 +58,15 @@
                 <svg viewBox="0 0 24 24"><path d="M8 20h12M4 15l8-10 7 6-7 9H8z" /><path d="M8 10l7 6" /></svg><span>消す</span>
               </button>
             </div>
-            <button id="ocrBtn" class="btn primary" title="手書きの図形・矢印・文字を清書する">
-              <svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8zM18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9z" /></svg>
-              <span>整形<span class="ocr-sub"> OCR</span></span><span id="inkCount" class="badge" hidden>0</span>
-            </button>
+            <div class="split">
+              <button id="ocrBtn" class="btn primary" title="手書きの図形・矢印・文字を清書する">
+                <svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8zM18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9z" /></svg>
+                <span>整形<span class="ocr-sub"> OCR</span></span><span id="inkCount" class="badge" hidden>0</span>
+              </button>
+              <button id="ocrMenuBtn" class="btn primary split-more" title="整形の種類を選ぶ" aria-label="整形の種類を選ぶ" aria-haspopup="menu">
+                <svg viewBox="0 0 24 24"><path d="M7 10l5 5 5-5" /></svg>
+              </button>
+            </div>
             <button id="clearInk" class="icon-btn" title="手書きをすべて消す" aria-label="手書きをすべて消す">
               <svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
             </button>
@@ -96,6 +101,12 @@
         <div id="selbar" class="selbar" hidden></div>
         <div id="hint" class="hint"></div>
       </main>
+    </div>
+
+    <div id="ocrMenu" class="menu" role="menu" hidden>
+      <button data-ocr="all" role="menuitem"><b>すべて整形</b><small>図形・線・文字をまとめて清書</small></button>
+      <button data-ocr="shapes" role="menuitem"><b>図形だけ整形</b><small>枠と線だけ清書し、文字は手書きのまま</small></button>
+      <button data-ocr="text" role="menuitem"><b>文字だけ整形</b><small>文字だけ清書し、図形は手書きのまま</small></button>
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
