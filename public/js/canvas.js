@@ -52,6 +52,7 @@ export class Canvas extends EventTarget {
     this.doc = doc;
     this.view = { x: 0, y: 0, k: 1 };
     this.tool = 'select'; // select | text | shape | eraser
+    this.zoomLocked = false; // true の間は拡大率を変えない（ピンチは移動だけになる）
     this.lastPen = 'text';
     this.penButtons = 0;
     this.swapPenButtons = false;
@@ -159,7 +160,17 @@ export class Canvas extends EventTarget {
     this.emit('view', this.view);
   }
 
+  /** 拡大率を固定する。k を渡すとその拡大率で固定する（前回の固定を復元するとき） */
+  setZoomLock(locked, k) {
+    this.zoomLocked = Boolean(locked);
+    if (this.zoomLocked && k) this.view = { ...this.view, k: clamp(k, MIN_ZOOM, MAX_ZOOM) };
+    this.emit('zoom-lock', this.zoomLocked);
+    this.emit('view', this.view);
+    this.requestRender();
+  }
+
   zoomAt(p, factor) {
+    if (this.zoomLocked) return;
     const k = clamp(this.view.k * factor, MIN_ZOOM, MAX_ZOOM);
     const w = this.toWorld(p);
     this.setView({ x: p.x - w.x * k, y: p.y - w.y * k, k });
@@ -179,7 +190,7 @@ export class Canvas extends EventTarget {
     const nodes = this.doc.nodes();
     const r = this.rect();
     if (!nodes.length) {
-      this.setView({ x: r.width / 2, y: r.height / 3, k: 1 });
+      this.setView({ x: r.width / 2, y: r.height / 3, k: this.zoomLocked ? this.view.k : 1 });
       return;
     }
     let minX = Infinity;
@@ -193,7 +204,8 @@ export class Canvas extends EventTarget {
       maxY = Math.max(maxY, n.y + n.h);
     }
     const pad = 60;
-    const k = clamp(Math.min((r.width - pad * 2) / (maxX - minX), (r.height - pad * 2) / (maxY - minY)), MIN_ZOOM, 1.5);
+    // 拡大率を固定しているときは、拡大率はそのままで全体の中心へ移動するだけ
+    const k = this.zoomLocked ? this.view.k : clamp(Math.min((r.width - pad * 2) / (maxX - minX), (r.height - pad * 2) / (maxY - minY)), MIN_ZOOM, 1.5);
     this.centerOn({ x: (minX + maxX) / 2, y: (minY + maxY) / 2 }, k);
   }
 
@@ -899,7 +911,7 @@ export class Canvas extends EventTarget {
     const r = this.rect();
     const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
     const m = { x: (pts[0].x + pts[1].x) / 2 - r.left, y: (pts[0].y + pts[1].y) / 2 - r.top };
-    const k = clamp(a.view.k * (d / a.d0), MIN_ZOOM, MAX_ZOOM);
+    const k = this.zoomLocked ? a.view.k : clamp(a.view.k * (d / a.d0), MIN_ZOOM, MAX_ZOOM);
     const wx = (a.m0.x - a.view.x) / a.view.k;
     const wy = (a.m0.y - a.view.y) / a.view.k;
     this.setView({ x: m.x - wx * k, y: m.y - wy * k, k });

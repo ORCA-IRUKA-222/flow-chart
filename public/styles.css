@@ -1328,3 +1328,25 @@ dialog {
 .selbar .btn.small {
   flex: none;
 }
+
+/* 拡大率の固定 */
+#zoomLockBtn .lock-closed {
+  display: none;
+}
+
+#zoomLockBtn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+#zoomLockBtn.active .lock-closed {
+  display: inline;
+}
+
+#zoomLockBtn.active .lock-open {
+  display: none;
+}
+
+.floatbar .icon-btn:disabled {
+  opacity: 0.35;
+}

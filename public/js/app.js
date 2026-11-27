@@ -25,7 +25,7 @@ import { debounce, el, hideToast, toast, uid } from './util.js';
 const $ = (id) => document.getElementById(id);
 
 // アプリを更新したら、sw.js の CACHE と一緒に変える
-export const APP_VERSION = '2026.11.27-2';
+export const APP_VERSION = '2026.11.27-3';
 
 const clientId = (() => {
   let id = localStorage.getItem('fc:client');
@@ -239,7 +239,14 @@ async function openBoard(id) {
   const v = localStorage.getItem(`fc:view:${id}`);
   if (v) {
     try {
-      canvas.setView(JSON.parse(v));
+      const saved = JSON.parse(v);
+      if (canvas.zoomLocked) {
+        // 固定中は拡大率を変えず、前回見ていた場所の中心を表示する
+        const r = canvas.rect();
+        canvas.centerOn({ x: (r.width / 2 - saved.x) / saved.k, y: (r.height / 2 - saved.y) / saved.k });
+      } else {
+        canvas.setView(saved);
+      }
     } catch {
       canvas.fit();
     }
@@ -1028,6 +1035,15 @@ function bindUI() {
     canvas.zoomAt({ x: r.width / 2, y: r.height / 2 }, 1 / canvas.view.k);
   });
   $('fitBtn').addEventListener('click', () => canvas.fit());
+  $('zoomLockBtn').addEventListener('click', () => toggleZoomLock());
+  canvas.addEventListener('zoom-lock', (e) => {
+    const on = e.detail;
+    $('zoomLockBtn').classList.toggle('active', on);
+    $('zoomLockBtn').setAttribute('aria-pressed', String(on));
+    $('zoomLockBtn').title = on ? '拡大率の固定を解除する（L）' : '拡大率を固定する（L）';
+    for (const id of ['zoomIn', 'zoomOut', 'zoomLabel']) $(id).disabled = on;
+  });
+  canvas.setZoomLock(localStorage.getItem('fc:zoomLock') === '1', Number(localStorage.getItem('fc:zoomLockK')) || undefined);
   $('exportBtn').addEventListener('click', exportBoard);
   $('status').addEventListener('click', openSyncDialog);
   $('syncBtn').addEventListener('click', openSyncDialog);
@@ -1078,6 +1094,7 @@ function bindUI() {
     else if (key === 'e') setTool('eraser');
     else if (key === 'p') setTool(canvas.tool === 'text' ? 'shape' : 'text');
     else if (key === 'f') canvas.fit();
+    else if (key === 'l') toggleZoomLock();
     else if (key === '+' || key === '=') canvas.zoomBy(1.25);
     else if (key === '-') canvas.zoomBy(0.8);
     else if (key === 'r' && canvas.ink.length) runOCR(e.shiftKey ? 'shapes' : 'all');
@@ -1144,6 +1161,13 @@ function bindUI() {
 }
 
 const saveViewSoon = debounce(saveView, 400);
+
+function toggleZoomLock() {
+  canvas.setZoomLock(!canvas.zoomLocked);
+  localStorage.setItem('fc:zoomLock', canvas.zoomLocked ? '1' : '0');
+  localStorage.setItem('fc:zoomLockK', String(canvas.view.k));
+  toast(canvas.zoomLocked ? `拡大率を ${Math.round(canvas.view.k * 100)}% で固定しました（2本指では移動だけ）` : '拡大率の固定を解除しました');
+}
 
 function closeOcrMenu() {
   $('ocrMenu').hidden = true;
